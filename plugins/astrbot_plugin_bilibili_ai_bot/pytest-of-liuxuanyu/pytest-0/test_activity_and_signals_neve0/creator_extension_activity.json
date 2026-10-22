@@ -1,0 +1,13 @@
+[
+  {
+    "extension_id": "creator",
+    "kind": "idea.created",
+    "entity_id": "i1",
+    "title": "Demo",
+    "actor": {
+      "role": "admin",
+      "source": ""
+    },
+    "created_at": "2026-10-19T02:37:24.386197+00:00"
+  }
+]

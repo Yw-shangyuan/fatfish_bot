@@ -1,0 +1,13 @@
+# FatFish bot source snapshot
+created_utc: 2026-10-22T02:37:43Z
+host: Ubuntu 24.04.4 LTS / x86_64
+astrbot_runtime: v4.29.1 (from server logs; official open source, not in this repo)
+napcat_image: mlikiowa/napcat-docker:latest
+plugin: astrbot_plugin_bilibili_ai_bot
+67c7161
+https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot.git
+modified_vs_upstream: 101
+plugin: astrbot_plugin_qq_proactive
+e5e21b7
+https://github.com/AstrBotDevs/AstrBot.git
+modified_vs_upstream: 1813

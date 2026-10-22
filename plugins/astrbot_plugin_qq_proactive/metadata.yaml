@@ -1,0 +1,10 @@
+name: astrbot_plugin_qq_proactive
+display_name: 主动伴聊 QQ
+desc: 按人设在活跃时段内主动给主人 QQ 私聊发消息，带每日上限、冷却与静默时段
+version: 1.0.0
+author: dsh-whale
+repo: ""
+tags:
+  - 主动消息
+  - 伴聊
+  - QQ

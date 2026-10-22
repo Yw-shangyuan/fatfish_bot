@@ -1,0 +1,66 @@
+{
+  "ENABLE": {
+    "description": "【总开关】启用主动消息",
+    "type": "bool",
+    "default": true
+  },
+  "API_KEY": {
+    "description": "【LLM】OpenAI 兼容接口 API Key",
+    "type": "string",
+    "default": "",
+    "hint": "需要 text generation 模型；可填与 AstrBot 聊天模型相同的服务商 Key。"
+  },
+  "API_BASE": {
+    "description": "【LLM】OpenAI 兼容接口 Base URL",
+    "type": "string",
+    "default": "https://api.openai.com/v1"
+  },
+  "MODEL": {
+    "description": "【LLM】生成消息使用的模型名",
+    "type": "string",
+    "default": "gpt-4o-mini"
+  },
+  "PERSONA": {
+    "description": "【人设】Bot 的角色与语气设定",
+    "type": "text",
+    "default": "你是一个住在 QQ 里的贴心小伙伴，性格开朗调皮，喜欢关心主人的日常。说话自然简短，像真人朋友，不用敬语，不发消息模板。",
+    "hint": "会注入到系统提示词。写得越具体，主动消息越不像 AI 腔。"
+  },
+  "OWNER_NAME": {
+    "description": "【人设】主人的称呼（注入提示词）",
+    "type": "string",
+    "default": "主人"
+  },
+  "ACTIVE_START": {
+    "description": "【作息】活跃时段开始（HH:MM，24小时制）",
+    "type": "string",
+    "default": "09:00"
+  },
+  "ACTIVE_END": {
+    "description": "【作息】活跃时段结束（HH:MM，可小于开始表示跨午夜）",
+    "type": "string",
+    "default": "23:00"
+  },
+  "MIN_INTERVAL_MINUTES": {
+    "description": "【频率】两条主动消息的最小间隔（分钟）",
+    "type": "int",
+    "default": 90
+  },
+  "MAX_INTERVAL_MINUTES": {
+    "description": "【频率】轮询随机等待的上限（分钟）",
+    "type": "int",
+    "default": 240
+  },
+  "DAILY_LIMIT": {
+    "description": "【频率】每日主动消息硬上限（条）",
+    "type": "int",
+    "default": 3,
+    "hint": "防骚扰与防风控。QQ 第三方协议有封号风险，请从小上限开始观察。"
+  },
+  "TARGET_UMO": {
+    "description": "【绑定】发送目标的会话 UMO",
+    "type": "string",
+    "default": "",
+    "hint": "无需手填：在目标 QQ 私聊中发送 /proactive 绑定 会自动写入。"
+  }
+}
