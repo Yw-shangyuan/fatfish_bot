@@ -905,6 +905,185 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
     @filter.command("bili模式")
     async def cmd_bili_mode(self, event: AstrMessageEvent):
         yield event.plain_result(await self._modes_command_text(event, "bili"))
+
+    # ===== QQ 内风控旋钮：静默时段 / 要@ / 限流 / 活跃值 =====
+    def _qq_quiet_window(self):
+        """解析 QQ_QUIET_HOURS（HH:MM-HH:MM，支持跨午夜），返回(当前是否在窗口内, 原文)。
+
+        Returns:
+            tuple[bool, str]: 是否命中静默时段；配置原文（空串=关闭）。非法配置视为关闭。
+        """
+        spec = str(self.config.get("QQ_QUIET_HOURS", "") or "").strip()
+        if not spec or "-" not in spec:
+            return False, spec
+        try:
+            sh, sm = (int(x) for x in spec.split("-", 1)[0].strip().split(":", 1))
+            eh, em = (int(x) for x in spec.split("-", 1)[1].strip().split(":", 1))
+            if not (0 <= sh <= 23 and 0 <= eh <= 23 and 0 <= sm <= 59 and 0 <= em <= 59):
+                return False, spec
+        except Exception:
+            return False, spec
+        now = datetime.now()
+        cur = now.hour * 60 + now.minute
+        start, end = sh * 60 + sm, eh * 60 + em
+        active = (start <= cur < end) if start < end else (cur >= start or cur < end)
+        return active, spec
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=65)
+    async def on_qq_safety_gate(self, event: AstrMessageEvent):
+        """QQ 侧风控安全闸门：静默时段(仅群聊) -> 要@(仅群聊) -> 发送限流。
+
+        "/" 开头的管理命令永远放行（保证静默半夜也能被主人关掉）；私聊不受静默/要@
+        限制；限流为 60 秒滑动窗口计"闸门放行票数"，超限进入冷却期全静默。被本闸门
+        拦下的消息不会走到 worthy 闸门，零 LLM 花费。"""
+        try:
+            if event.get_platform_name() == "webchat":
+                return
+        except Exception:
+            return
+        if str(event.message_str or "").strip().startswith("/"):
+            return
+        is_group = False
+        try:
+            is_group = bool(event.get_group())
+        except Exception:
+            pass
+        if is_group:
+            if self._qq_quiet_window()[0]:
+                event.stop_event()
+                return
+            if self.config.get("QQ_NEED_AT", False) and not event.is_at_or_wake_command:
+                event.stop_event()
+                return
+        per_min = int(self.config.get("QQ_RATE_PER_MIN", 0) or 0)
+        if per_min > 0:
+            now = time.time()
+            if now < getattr(self, "_qq_rate_block_until", 0.0):
+                event.stop_event()
+                return
+            marks = getattr(self, "_qq_rate_marks", None)
+            if marks is None:
+                marks = self._qq_rate_marks = []
+            marks[:] = [t for t in marks if now - t < 60.0]
+            if len(marks) >= per_min:
+                cooldown = int(self.config.get("QQ_RATE_COOLDOWN_SEC", 0) or 0)
+                if cooldown > 0:
+                    self._qq_rate_block_until = now + cooldown
+                event.stop_event()
+                logger.info(f"[BiliBot] QQ 限流触发，静默丢弃消息（冷却 {cooldown}s）")
+                return
+            marks.append(now)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq设置")
+    async def cmd_qq_settings(self, event: AstrMessageEvent):
+        quiet_active, quiet_spec = self._qq_quiet_window()
+        per_min = int(self.config.get("QQ_RATE_PER_MIN", 0) or 0)
+        cooldown = int(self.config.get("QQ_RATE_COOLDOWN_SEC", 0) or 0)
+        lines = [
+            "🎛️ 肥鱼 QQ 风控配置：",
+            f"静默时段：{quiet_spec or '关'}{' ← 当前在窗口内，群里装死中' if quiet_active else ''}（改法：/qq静默 23:30-08:00 或 /qq静默 关）",
+            f"活跃值：{int(self.config.get('QQ_ACTIVE_SCORE', 50) or 0)}/100，越高越爱搭话（改法：/qq活跃 30）",
+            f"限流：{'关' if per_min <= 0 else f'每分钟最多 {per_min} 条，超限冷却 {cooldown} 秒'}（改法：/qq限流 2 180 或 /qq限流 0 0）",
+            f"群聊要@：{'✅ 开（没@肥鱼一律不理，含主人）' if self.config.get('QQ_NEED_AT', False) else '关'}（改法：/qq要@ 开/关）",
+            f"当前 QQ 模式：{self.config.get('QQ_MODE', 'normal')}（改法：/qq模式）",
+            "注：静默与要@只限制群聊，私聊永远理主人；/ 开头命令永远放行。",
+        ]
+        yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq静默")
+    async def cmd_qq_quiet(self, event: AstrMessageEvent):
+        toks = event.message_str.strip().split(maxsplit=1)
+        if len(toks) < 2:
+            active, spec = self._qq_quiet_window()
+            yield event.plain_result(f"当前静默时段：{spec or '关'}{'（现在就在窗口内）' if active else ''}\n用法：/qq静默 23:30-08:00（支持跨午夜）或 /qq静默 关")
+            return
+        arg = toks[1].strip()
+        if arg in {"关", "关闭", "off", "0"}:
+            self.config["QQ_QUIET_HOURS"] = ""
+            self.config.save_config()
+            yield event.plain_result("✅ 静默时段已关闭，肥鱼恢复全天活动")
+            return
+        spec = arg.replace("—", "-").replace("~", "-")
+        halves = spec.split("-", 1)
+        fmt = ""
+        ok = len(halves) == 2
+        if ok:
+            try:
+                sh, sm = (int(x) for x in halves[0].strip().split(":", 1))
+                eh, em = (int(x) for x in halves[1].strip().split(":", 1))
+                ok = 0 <= sh <= 23 and 0 <= eh <= 23 and 0 <= sm <= 59 and 0 <= em <= 59
+                if ok:
+                    fmt = f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}"
+            except Exception:
+                ok = False
+        if not ok:
+            yield event.plain_result("❌ 时间格式不对，示例：/qq静默 23:30-08:00（支持跨午夜）")
+            return
+        self.config["QQ_QUIET_HOURS"] = fmt
+        self.config.save_config()
+        active, _ = self._qq_quiet_window()
+        yield event.plain_result(f"✅ 静默时段已设为 {fmt}（仅群聊，私聊豁免）{'; 当前正处于窗口内，立刻开始装死' if active else ''}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq活跃")
+    async def cmd_qq_active(self, event: AstrMessageEvent):
+        toks = event.message_str.strip().split(maxsplit=1)
+        cur = int(self.config.get("QQ_ACTIVE_SCORE", 50) or 0)
+        if len(toks) < 2 or not toks[1].strip().isdigit():
+            yield event.plain_result(f"当前活跃值：{cur}/100（越低越爱答不理，越高有话就接）\n用法：/qq活跃 30")
+            return
+        v = max(0, min(100, int(toks[1].strip())))
+        self.config["QQ_ACTIVE_SCORE"] = v
+        self.config.save_config()
+        mood = "进入高冷模式，装死本鲸专业得很" if v <= 30 else ("放开手脚，有话就接" if v >= 70 else "中庸之道，咕噜")
+        yield event.plain_result(f"✅ 活跃值已设为 {v}/100：{mood}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq限流")
+    async def cmd_qq_rate(self, event: AstrMessageEvent):
+        toks = event.message_str.strip().split()
+        if len(toks) < 2:
+            per_min = int(self.config.get("QQ_RATE_PER_MIN", 0) or 0)
+            cooldown = int(self.config.get("QQ_RATE_COOLDOWN_SEC", 0) or 0)
+            cur = "关" if per_min <= 0 else f"每分钟 {per_min} 条 / 超限冷却 {cooldown}s"
+            yield event.plain_result(f"当前限流：{cur}\n用法：/qq限流 2 180（每分钟最多2条回复，超限冷却3分钟）或 /qq限流 0 0 关闭")
+            return
+        if toks[1] in {"关", "关闭", "off"}:
+            per, cool = 0, 0
+        elif len(toks) >= 3 and toks[1].isdigit() and toks[2].isdigit():
+            per, cool = min(60, int(toks[1])), min(3600, int(toks[2]))
+        else:
+            yield event.plain_result("❌ 用法：/qq限流 每分钟条数 冷却秒数（例：/qq限流 2 180），或 /qq限流 关")
+            return
+        self.config["QQ_RATE_PER_MIN"] = per
+        self.config["QQ_RATE_COOLDOWN_SEC"] = cool
+        self._qq_rate_marks = []
+        self._qq_rate_block_until = 0.0
+        self.config.save_config()
+        yield event.plain_result("✅ 限流已关闭" if per <= 0 else f"✅ 限流已设为：每分钟最多 {per} 条放行，超限静默 {cool} 秒")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq要@")
+    async def cmd_qq_needat(self, event: AstrMessageEvent):
+        toks = event.message_str.strip().split(maxsplit=1)
+        cur = bool(self.config.get("QQ_NEED_AT", False))
+        if len(toks) < 2:
+            yield event.plain_result(f"当前群聊要@：{'✅ 开' if cur else '关'}\n用法：/qq要@ 开（群里没@肥鱼一律装死，私聊不受影响）或 /qq要@ 关")
+            return
+        arg = toks[1].strip()
+        if arg in {"开", "开启", "on", "1"}:
+            on = True
+        elif arg in {"关", "关闭", "off", "0"}:
+            on = False
+        else:
+            yield event.plain_result("❌ 用法：/qq要@ 开 或 /qq要@ 关")
+            return
+        self.config["QQ_NEED_AT"] = on
+        self.config.save_config()
+        yield event.plain_result("✅ 群聊要@已开启：没 @ 肥鱼的话人家装死给你看，喵~" if on else "✅ 群聊要@已关闭：恢复自由搭话模式")
+
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili刷新")
     async def cmd_refresh_cookie(self, event: AstrMessageEvent):
@@ -1568,7 +1747,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
 
     @filter.command("bili帮助")
     async def cmd_help(self, event: AstrMessageEvent):
-        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili直播 — 进入指定直播间参与弹幕互动\n/bili计划 — 查看今日主动/动态/看番时间\n/bili分区 — 查看视频池中文填法和分区名\n/bili启动 — 启动\n/bili停止 — 停止\n/bili主动 — 立刻触发一次主动看视频\n/bili解析 [链接/BV号] — 解析指定、引用或上一个视频\n/bili开关 — 功能开关\n/bili模式 — 切换人设模式(常规/简单/贴吧)\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili拉黑 — 手动拉黑\n/bili解黑 — 解除拉黑\n/bili黑名单 — 查看黑名单\n/bili兴趣 — 查看近期视频口味与已沉淀偏好\n/bili性格 — 查看性格演化\n/bili性格编辑 — 手动编辑性格\n/bili性格删除 — 删除演化条目\n/bili日志 视频 — 主动看视频&评论记录\n/bili日志 番剧 — 看番记录\n/bili日志 动态 — 动态发布记录\n/bili日志 回复 — 评论回复记录\n/bili开关 解析 — 视频解析总开关\n/bili开关 自动解析 — 聊天链接自动解析开关\n/bili开关 手动解析 — /bili解析 命令开关\n/bili开关 LLM解析 — bili_parse_video 工具开关\n/bili开关 解析视频 — 是否发送原视频切片\n/bili开关 筛选 — 主动看视频前标题筛选\n/bili开关 直播回复 — 直播间弹幕互动开关\n/bili联动 — 查看直播伴侣联动状态\n/bili看番 — 手动触发看番\n/bili番剧记忆 — 查看追番进度\n/bili永久记忆 — 查看/删除永久记忆\n/bili动态 — 手动发动态\n/bili绑定 — 绑定QQ与B站UID\n/bili解绑 — 解除绑定\n/bili清理 — 清理临时文件\n/bili帮助 — 本帮助\n/biliUMO — 获取当前UMO并自动填入配置\n━━━━━━━━━━━━\n💡 首次用 /bili登录\n💡 视频池配置不会背编号时，用 /bili分区 查中文填法")
+        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili直播 — 进入指定直播间参与弹幕互动\n/bili计划 — 查看今日主动/动态/看番时间\n/bili分区 — 查看视频池中文填法和分区名\n/bili启动 — 启动\n/bili停止 — 停止\n/bili主动 — 立刻触发一次主动看视频\n/bili解析 [链接/BV号] — 解析指定、引用或上一个视频\n/bili开关 — 功能开关\n/bili模式 — 切换B站评论人设(温和/毒舌)\n/qq模式 — 切换QQ聊天人格(常规/简单/贴吧)\n/qq设置 — 查看QQ风控配置\n/qq静默 — 设置静默时段(如23:30-08:00/关)\n/qq活跃 — 回复活跃值0~100\n/qq限流 — 每分钟放行条数+冷却\n/qq要@ — 群聊必须@才回(开/关)\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili拉黑 — 手动拉黑\n/bili解黑 — 解除拉黑\n/bili黑名单 — 查看黑名单\n/bili兴趣 — 查看近期视频口味与已沉淀偏好\n/bili性格 — 查看性格演化\n/bili性格编辑 — 手动编辑性格\n/bili性格删除 — 删除演化条目\n/bili日志 视频 — 主动看视频&评论记录\n/bili日志 番剧 — 看番记录\n/bili日志 动态 — 动态发布记录\n/bili日志 回复 — 评论回复记录\n/bili开关 解析 — 视频解析总开关\n/bili开关 自动解析 — 聊天链接自动解析开关\n/bili开关 手动解析 — /bili解析 命令开关\n/bili开关 LLM解析 — bili_parse_video 工具开关\n/bili开关 解析视频 — 是否发送原视频切片\n/bili开关 筛选 — 主动看视频前标题筛选\n/bili开关 直播回复 — 直播间弹幕互动开关\n/bili联动 — 查看直播伴侣联动状态\n/bili看番 — 手动触发看番\n/bili番剧记忆 — 查看追番进度\n/bili永久记忆 — 查看/删除永久记忆\n/bili动态 — 手动发动态\n/bili绑定 — 绑定QQ与B站UID\n/bili解绑 — 解除绑定\n/bili清理 — 清理临时文件\n/bili帮助 — 本帮助\n/biliUMO — 获取当前UMO并自动填入配置\n━━━━━━━━━━━━\n💡 首次用 /bili登录\n💡 视频池配置不会背编号时，用 /bili分区 查中文填法")
 
     # ===== QQ↔B站 记忆互通 =====
     @filter.command("bili绑定")

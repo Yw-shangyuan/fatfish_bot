@@ -111,8 +111,17 @@ class ReplyMixin:
     async def _should_reply_by_interest(self, content, username, channel="comment"):
         if channel == "owner":
             # 主人消息闸门：判定“看不看得懂/接不接得住”，与兴趣筛选共用解析逻辑。
+            # QQ_ACTIVE_SCORE 是主人可调的松紧旋钮：低=从严装死，高=从宽秒回。
+            score = int(self.config.get("QQ_ACTIVE_SCORE", 50) or 0)
+            if score <= 30:
+                tone = f"当前尺度({score}/100)：从严。只有明确值得接、你有把握接得漂亮的消息才 true，模棱两可一律 false。"
+            elif score >= 70:
+                tone = f"当前尺度({score}/100)：从宽。只要有一点接话空间就 true，拿不准也先 true 再自然反问。"
+            else:
+                tone = f"当前尺度({score}/100)：适中，按下面的常规规则判断。"
             prompt = f"""你是"大肥鱼"本人。下面是主人刚发来的消息。判断你能不能看懂这条消息、能不能自然地接下去。
 只输出严格 JSON：{{"reply":true,"reason":"不超过30字"}}。
+{tone}
 - 缺少主语、指代不明、上下文缺失，靠猜也不知道主人在说什么 → false
 - 没十足把握但能猜到大致意思，或可以反问一句接着聊 → true
 - 明确的指令、提问、分享、闲聊话题 → true

@@ -1782,5 +1782,41 @@
     "type": "string",
     "default": "宇文尚元的蓝色大肥鱼",
     "hint": "必须与 agent_runner 当前引用的人格一致，否则切的不是这只鲸。一般不用改。"
+  },
+  "QQ_QUIET_HOURS": {
+    "description": "【风控旋钮】QQ 每日静默时段",
+    "type": "string",
+    "default": "",
+    "hint": "格式 HH:MM-HH:MM，支持跨午夜（如 23:30-08:00）。命中时段群聊完全装死，私聊不受限；留空=关闭。由 /qq静默 命令设置。"
+  },
+  "QQ_ACTIVE_SCORE": {
+    "description": "【风控旋钮】回复活跃值 0-100",
+    "type": "int",
+    "default": 50,
+    "min": 0,
+    "max": 100,
+    "hint": "调整主人消息闸门的松紧：低=从严（爱答不理），高=从宽（有话就接）。由 /qq活跃 命令设置。"
+  },
+  "QQ_RATE_PER_MIN": {
+    "description": "【风控旋钮】每分钟最多放行的回复数",
+    "type": "int",
+    "default": 0,
+    "min": 0,
+    "max": 60,
+    "hint": "0=不限流。超限后进入 QQ_RATE_COOLDOWN_SEC 冷却，冷却期内消息全部静默。由 /qq限流 命令设置。"
+  },
+  "QQ_RATE_COOLDOWN_SEC": {
+    "description": "【风控旋钮】限流触发后的冷却秒数",
+    "type": "int",
+    "default": 0,
+    "min": 0,
+    "max": 3600,
+    "hint": "仅在 QQ_RATE_PER_MIN 大于 0 时生效。由 /qq限流 命令设置。"
+  },
+  "QQ_NEED_AT": {
+    "description": "【风控旋钮】群消息必须 @肥鱼 才回复",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后群里没有 @ 的消息一律静默（对所有人生效，含主人），私聊不受影响。由 /qq要@ 命令设置。"
   }
 }
