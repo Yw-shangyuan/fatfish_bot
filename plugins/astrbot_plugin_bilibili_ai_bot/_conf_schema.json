@@ -1759,11 +1759,17 @@
     "default": 5,
     "hint": "建议 3-8"
   },
-  "CURRENT_MODE": {
-    "description": "【模式系统】当前激活的人设模式",
+  "QQ_MODE": {
+    "description": "【模式系统】当前激活的 QQ 聊天模式",
     "type": "string",
     "default": "normal",
-    "hint": "由 /bili模式 命令切换，正常情况不要手改。模式文件在插件 modes/ 目录，plugin_data/modes/ 可放同名覆盖版本。"
+    "hint": "由 /qq模式 命令切换，正常情况不要手改。模式文件在插件 modes/qq/ 目录，plugin_data/modes/qq/ 可放同名覆盖版本。"
+  },
+  "BILI_MODE": {
+    "description": "【模式系统】当前激活的 B站侧模式",
+    "type": "string",
+    "default": "normal",
+    "hint": "由 /bili模式 命令切换，覆盖评论人设两键文案。模式文件在插件 modes/bili/ 目录，plugin_data/modes/bili/ 可放自定义版本。"
   },
   "OWNER_WORTHY_GATE": {
     "description": "【模式系统】主人消息理解闸门总开关",

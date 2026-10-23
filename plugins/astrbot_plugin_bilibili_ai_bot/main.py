@@ -897,27 +897,14 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             logger.info(f"[BiliBot] 主人消息闸门静默：{str(reason)[:60]}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq模式")
+    async def cmd_qq_mode(self, event: AstrMessageEvent):
+        yield event.plain_result(await self._modes_command_text(event, "qq"))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili模式")
-    async def cmd_modes(self, event: AstrMessageEvent):
-        parts = event.message_str.strip().split(maxsplit=1)
-        modes = self._modes_load(refresh=True)
-        cur = self._current_mode_key()
-        if len(parts) < 2:
-            lines = ["🐳 可切换的人设模式："]
-            for k, cfg in modes.items():
-                mark = "  ← 当前" if k == cur else ""
-                lines.append(f"  {cfg.get('name') or k}{mark}")
-                if cfg.get("desc"):
-                    lines.append(f"    {cfg['desc']}")
-            lines += ["", "用法: /bili模式 <模式名>", "提示: 切换即时生效，不影响B站侧人设与行为。"]
-            yield event.plain_result("\n".join(lines))
-            return
-        key = self._mode_find(modes, parts[1])
-        if not key:
-            names = "、".join(str(c.get("name") or k) for k, c in modes.items())
-            yield event.plain_result(f"❌ 不认识的模式：{parts[1]}\n可选项：{names}")
-            return
-        yield event.plain_result(await self._mode_apply(key))
+    async def cmd_bili_mode(self, event: AstrMessageEvent):
+        yield event.plain_result(await self._modes_command_text(event, "bili"))
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili刷新")
     async def cmd_refresh_cookie(self, event: AstrMessageEvent):
