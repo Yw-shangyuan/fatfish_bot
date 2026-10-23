@@ -32,6 +32,10 @@ _QQ_VIEW_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath
 # hard minimum gap regardless of model or persona behaviour.
 QQ_SEND_MIN_GAP = 5.0
 QQ_SEND_QUEUE_LIMIT = 120.0
+# Stale-message guard: on reconnect QQ redelivers the offline backlog carrying
+# the original sender timestamp in raw_message. Drop anything older than this to
+# avoid echoing hours-old chats and to save tokens.
+QQ_STALE_MAX_AGE_SEC = 1800
 
 
 def install_qq_send_throttle() -> bool:
@@ -1000,6 +1004,20 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             return
         if str(event.message_str or "").strip().startswith("/"):
             return
+        # Stale check must read the platform raw event: AstrBot overwrites
+        # message_obj.timestamp with convert time, hiding the real send time.
+        try:
+            raw = getattr(event.message_obj, "raw_message", None)
+            msg_time = float(raw.get("time", 0) or 0) if hasattr(raw, "get") else 0.0
+            if msg_time and time.time() - msg_time > QQ_STALE_MAX_AGE_SEC:
+                logger.debug(
+                    f"[BiliBot] dropping stale QQ message "
+                    f"(age {int(time.time() - msg_time)}s)"
+                )
+                event.stop_event()
+                return
+        except Exception:
+            pass
         is_group = False
         try:
             is_group = bool(event.get_group_id())
