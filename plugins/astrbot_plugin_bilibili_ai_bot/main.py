@@ -26,6 +26,60 @@ _BILIBOT_MAIN_TASK_NAME = "astrbot_plugin_bilibili_ai_bot.main_loop"
 # AstrBot data/ 目录：插件目录为 data/plugins/<name>/，向上两级即 data/
 _QQ_VIEW_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
+# ---- QQ send throttle: hard global pacing on every QQ outgoing message ----
+# All QQ sends (reply/streaming/forward/proactive) funnel through
+# AiocqhttpMessageEvent.send_message, so one class-level wrapper enforces a
+# hard minimum gap regardless of model or persona behaviour.
+QQ_SEND_MIN_GAP = 5.0
+QQ_SEND_QUEUE_LIMIT = 120.0
+
+
+def install_qq_send_throttle() -> bool:
+    """Patch the aiocqhttp send path with a global pacing lock.
+
+    Returns:
+        True when the throttle is active (already armed or freshly armed).
+    """
+    try:
+        from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+            AiocqhttpMessageEvent,
+        )
+    except Exception as exc:
+        logger.warning(f"[BiliBot] QQ throttle module not importable: {exc}")
+        return False
+    if getattr(AiocqhttpMessageEvent, "_qq_send_paced", False):
+        return True
+    orig = AiocqhttpMessageEvent.__dict__["send_message"].__func__
+    lock = asyncio.Lock()
+    state = {"last": 0.0}
+
+    async def paced(cls, *args, **kwargs):
+        enqueued = time.monotonic()
+        async with lock:
+            queued = time.monotonic() - enqueued
+            if queued > QQ_SEND_QUEUE_LIMIT:
+                logger.warning(
+                    f"[BiliBot] QQ throttle queue overflow, dropping message "
+                    f"(waited {queued:.0f}s)"
+                )
+                return
+            wait = QQ_SEND_MIN_GAP - (time.monotonic() - state["last"])
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                await orig(cls, *args, **kwargs)
+            finally:
+                state["last"] = time.monotonic()
+
+    paced.__qq_send_paced__ = True
+    AiocqhttpMessageEvent.send_message = classmethod(paced)
+    AiocqhttpMessageEvent._qq_send_paced = True
+    logger.info(
+        f"[BiliBot] QQ send throttle armed: min gap {QQ_SEND_MIN_GAP}s, "
+        f"queue limit {QQ_SEND_QUEUE_LIMIT:.0f}s"
+    )
+    return True
+
 
 def get_bilibili_ai_bot_api():
     """Return the active v2 memory/profile API for companion plugins."""
@@ -117,6 +171,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
 
     async def initialize(self):
         """Start background work only after AstrBot has formally activated the plugin."""
+        install_qq_send_throttle()
         try:
             await self.layered_runtime.open()
             logger.info("[BiliBot] 四层运行服务已连接")
@@ -947,7 +1002,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             return
         is_group = False
         try:
-            is_group = bool(event.get_group())
+            is_group = bool(event.get_group_id())
         except Exception:
             pass
         if is_group:
@@ -1143,7 +1198,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
     @filter.command("qq人格")
     async def cmd_qq_persona(self, event: AstrMessageEvent):
         try:
-            if event.get_group():
+            if event.get_group_id():
                 yield event.plain_result("🔒 仅支持主人私聊查看，防止人设发到群里被围观，喵~")
                 return
         except Exception:
@@ -1185,7 +1240,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
     @filter.command("qq知识库")
     async def cmd_qq_kb(self, event: AstrMessageEvent):
         try:
-            if event.get_group():
+            if event.get_group_id():
                 yield event.plain_result("🔒 仅支持主人私聊查看知识库，喵~")
                 return
         except Exception:
