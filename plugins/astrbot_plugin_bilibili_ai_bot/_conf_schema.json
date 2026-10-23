@@ -1818,5 +1818,19 @@
     "type": "bool",
     "default": false,
     "hint": "开启后群里没有 @ 的消息一律静默（对所有人生效，含主人），私聊不受影响。由 /qq要@ 命令设置。"
+  },
+  "QQ_VIEW_WHITELIST_PERSONAS": {
+    "description": "【只读查看器】允许查看的人格名白名单",
+    "type": "list",
+    "items": {"type": "string"},
+    "default": [],
+    "hint": "为空=任何人格都不可查看。由 /qq白名单 +人格:<名> 增删。查看类指令仅限主人私聊。"
+  },
+  "QQ_VIEW_WHITELIST_KBS": {
+    "description": "【只读查看器】允许查看的知识库白名单",
+    "type": "list",
+    "items": {"type": "string"},
+    "default": [],
+    "hint": "为空=任何知识库都不可查看。由 /qq白名单 +知识库:<名> 增删。查看类指令仅限主人私聊。"
   }
 }

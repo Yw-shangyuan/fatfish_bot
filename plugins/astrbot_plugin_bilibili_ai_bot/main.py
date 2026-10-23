@@ -4,7 +4,7 @@ AstrBot Plugin - Bilibili Bot 1.6.1
 拆分版本：核心逻辑分布在 core/ 下的 Mixin 模块中。
 """
 import sys
-import io, os, time, asyncio, random, traceback
+import io, os, time, json, asyncio, random, traceback, sqlite3
 from datetime import datetime
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -23,6 +23,8 @@ from .core import (
 
 _ACTIVE_BILIBOT = None
 _BILIBOT_MAIN_TASK_NAME = "astrbot_plugin_bilibili_ai_bot.main_loop"
+# AstrBot data/ 目录：插件目录为 data/plugins/<name>/，向上两级即 data/
+_QQ_VIEW_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 
 def get_bilibili_ai_bot_api():
@@ -1084,6 +1086,192 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         self.config.save_config()
         yield event.plain_result("✅ 群聊要@已开启：没 @ 肥鱼的话人家装死给你看，喵~" if on else "✅ 群聊要@已关闭：恢复自由搭话模式")
 
+    # ===== QQ 只读查看器：人格 / 知识库（ADMIN + 仅私聊 + 白名单三道门） =====
+    def _qq_view_ro(self, path, sql, args=()):
+        """只读方式查询 sqlite（mode=ro，绝不写入）。"""
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return con.execute(sql, args).fetchall()
+        finally:
+            con.close()
+
+    @staticmethod
+    def _qq_view_chunks(text, size=1800):
+        text = str(text or "").strip()
+        return [text[i:i + size] for i in range(0, len(text), size)] or ["（空）"]
+
+    def _qq_view_allowed(self, kind, name):
+        key = "QQ_VIEW_WHITELIST_PERSONAS" if kind == "p" else "QQ_VIEW_WHITELIST_KBS"
+        return name in [str(x).strip() for x in (self.config.get(key, []) or [])]
+
+    async def _qq_kb_list(self, kb_root):
+        """扫描 knowledge_base/<kb_id>/doc.db，返回 [(kb_id, 展示名, 文档数)]。"""
+        out = []
+        for d in sorted(os.listdir(kb_root)):
+            docdb = os.path.join(kb_root, d, "doc.db")
+            if not os.path.isfile(docdb):
+                continue
+            try:
+                n = self._qq_view_ro(docdb, "SELECT COUNT(*) FROM documents")[0][0]
+                rows = self._qq_view_ro(docdb, "SELECT metadata FROM documents ORDER BY id LIMIT 1")
+                kbname = ""
+                if rows:
+                    try:
+                        md = json.loads(rows[0][0] or "{}")
+                        kbname = str(md.get("kb_name") or md.get("name") or "")
+                        if not kbname and md.get("file_path"):
+                            kbname = os.path.splitext(os.path.basename(str(md["file_path"])))[0]
+                    except Exception:
+                        pass
+                out.append((d, kbname or f"kb-{d[:8]}", n))
+            except Exception:
+                out.append((d, f"kb-{d[:8]}", -1))
+        return out
+
+    @staticmethod
+    def _qq_doc_title(metadata_json, idx):
+        try:
+            md = json.loads(metadata_json or "{}")
+            fp = str(md.get("file_path") or md.get("title") or "")
+            if fp:
+                return os.path.splitext(os.path.basename(fp))[0]
+        except Exception:
+            pass
+        return f"条目{idx}"
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq人格")
+    async def cmd_qq_persona(self, event: AstrMessageEvent):
+        try:
+            if event.get_group():
+                yield event.plain_result("🔒 仅支持主人私聊查看，防止人设发到群里被围观，喵~")
+                return
+        except Exception:
+            pass
+        db = os.path.join(_QQ_VIEW_DATA_DIR, "data_v4.db")
+        if not os.path.isfile(db):
+            yield event.plain_result("❌ 找不到 AstrBot 主库 data_v4.db")
+            return
+        toks = event.message_str.strip().split(maxsplit=1)
+        cur = str(self.config.get("MODE_PERSONA_ID", "") or "")
+        try:
+            rows = await asyncio.to_thread(self._qq_view_ro, db, "SELECT persona_id, LENGTH(system_prompt) FROM personas ORDER BY persona_id")
+        except Exception as exc:
+            yield event.plain_result(f"❌ 读取失败：{str(exc)[:80]}")
+            return
+        if len(toks) < 2:
+            lines = ["🎭 AstrBot 人格列表（🔓白名单内可查 / 🔒不可查）："]
+            for pid, plen in rows:
+                lines.append(f"{'🐟' if pid == cur else '・'}{'🔓' if self._qq_view_allowed('p', pid) else '🔒'} {pid}（{plen}字）")
+            lines.append("查看：/qq人格 <名字>（仅限白名单，管理：/qq白名单）")
+            yield event.plain_result("\n".join(lines))
+            return
+        name = toks[1].strip()
+        if not any(r[0] == name for r in rows):
+            yield event.plain_result(f"❌ 没有名为「{name}」的人格")
+            return
+        if not self._qq_view_allowed("p", name):
+            yield event.plain_result(f"🔒 此条目不可查看。主人可先添加：/qq白名单 +人格:{name}")
+            return
+        pr = await asyncio.to_thread(self._qq_view_ro, db, "SELECT system_prompt FROM personas WHERE persona_id=?", (name,))
+        if not pr:
+            yield event.plain_result("❌ 查询失败")
+            return
+        yield event.plain_result(f"🎭 人格「{name}」system_prompt：")
+        for chunk in self._qq_view_chunks(pr[0][0]):
+            yield event.plain_result(chunk)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq知识库")
+    async def cmd_qq_kb(self, event: AstrMessageEvent):
+        try:
+            if event.get_group():
+                yield event.plain_result("🔒 仅支持主人私聊查看知识库，喵~")
+                return
+        except Exception:
+            pass
+        kb_root = os.path.join(_QQ_VIEW_DATA_DIR, "knowledge_base")
+        if not os.path.isdir(kb_root):
+            yield event.plain_result("❌ 未找到知识库目录 knowledge_base")
+            return
+        toks = event.message_str.strip().split(maxsplit=2)
+        kbs = await asyncio.to_thread(self._qq_kb_list, kb_root)
+        if not kbs:
+            yield event.plain_result("📚 还没有任何知识库")
+            return
+        if len(toks) < 2:
+            lines = ["📚 知识库列表（🔓白名单内可查）："]
+            for kb_id, kbname, n in kbs:
+                lock = "🔓" if (self._qq_view_allowed("k", kbname) or self._qq_view_allowed("k", kb_id)) else "🔒"
+                lines.append(f"{lock} {kbname}（{n if n >= 0 else '?'}篇，{kb_id[:8]}）")
+            lines.append("查看：/qq知识库 <库名> [编号]（管理：/qq白名单）")
+            yield event.plain_result("\n".join(lines))
+            return
+        target = toks[1].strip()
+        hit = next(((k, nm, n) for k, nm, n in kbs if nm == target or k == target or k.startswith(target)), None)
+        if not hit:
+            yield event.plain_result(f"❌ 没有名为「{target}」的知识库")
+            return
+        kb_id, kbname, _ = hit
+        if not (self._qq_view_allowed("k", kbname) or self._qq_view_allowed("k", kb_id)):
+            yield event.plain_result(f"🔒 此条目不可查看。主人可先添加：/qq白名单 +知识库:{kbname}")
+            return
+        docdb = os.path.join(kb_root, kb_id, "doc.db")
+        if len(toks) < 3:
+            docs = await asyncio.to_thread(self._qq_view_ro, docdb, "SELECT id, substr(text,1,40), metadata FROM documents ORDER BY id")
+            lines = [f"📚「{kbname}」共 {len(docs)} 条："]
+            for did, prev, md in docs:
+                lines.append(f"{did}. {self._qq_doc_title(md, did)}｜{str(prev or '').replace(chr(10), ' ')[:36]}…")
+            lines.append("查看全文：/qq知识库 " + target + " <编号>")
+            yield event.plain_result("\n".join(lines))
+            return
+        if not toks[2].strip().isdigit():
+            yield event.plain_result("❌ 编号要用数字，例：/qq知识库 大肥鱼人设 3")
+            return
+        doc = await asyncio.to_thread(self._qq_view_ro, docdb, "SELECT text FROM documents WHERE id=?", (int(toks[2].strip()),))
+        if not doc:
+            yield event.plain_result("❌ 没有这个编号的文档")
+            return
+        for chunk in self._qq_view_chunks(doc[0][0]):
+            yield event.plain_result(chunk)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq白名单")
+    async def cmd_qq_viewlist(self, event: AstrMessageEvent):
+        pk = "QQ_VIEW_WHITELIST_PERSONAS"
+        kk = "QQ_VIEW_WHITELIST_KBS"
+        toks = event.message_str.strip().split(maxsplit=1)
+        if len(toks) < 2:
+            p = self.config.get(pk, []) or []
+            k = self.config.get(kk, []) or []
+            yield event.plain_result(
+                "🗝️ 查看白名单（为空=什么都不可查看）\n"
+                f"人格：{'、'.join(p) if p else '（空）'}\n"
+                f"知识库：{'、'.join(k) if k else '（空）'}\n"
+                "用法：/qq白名单 +人格:<名> 或 -人格:<名>；知识库同理（/qq白名单 +知识库:<名>）"
+            )
+            return
+        arg = toks[1].strip().replace("：", ":", 1)
+        if arg[:1] not in {"+", "-"} or ":" not in arg:
+            yield event.plain_result("❌ 用法：/qq白名单 +人格:<名> / -知识库:<名>")
+            return
+        sign = arg[0]
+        kind = arg[1:arg.index(":")]
+        name = arg[arg.index(":") + 1:].strip()
+        key = pk if kind in {"人格", "人设"} else kk if kind in {"知识库", "库"} else ""
+        if not key or not name:
+            yield event.plain_result("❌ 类别只支持 人格/人设/知识库/库")
+            return
+        cur = [str(x).strip() for x in (self.config.get(key, []) or [])]
+        if sign == "+":
+            if name not in cur:
+                cur.append(name)
+        else:
+            cur = [x for x in cur if x != name]
+        self.config[key] = cur
+        self.config.save_config()
+        yield event.plain_result(f"✅ 已{'加入' if sign == '+' else '移出'}白名单：{name}")
+
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili刷新")
     async def cmd_refresh_cookie(self, event: AstrMessageEvent):
@@ -1747,7 +1935,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
 
     @filter.command("bili帮助")
     async def cmd_help(self, event: AstrMessageEvent):
-        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili直播 — 进入指定直播间参与弹幕互动\n/bili计划 — 查看今日主动/动态/看番时间\n/bili分区 — 查看视频池中文填法和分区名\n/bili启动 — 启动\n/bili停止 — 停止\n/bili主动 — 立刻触发一次主动看视频\n/bili解析 [链接/BV号] — 解析指定、引用或上一个视频\n/bili开关 — 功能开关\n/bili模式 — 切换B站评论人设(温和/毒舌)\n/qq模式 — 切换QQ聊天人格(常规/简单/贴吧)\n/qq设置 — 查看QQ风控配置\n/qq静默 — 设置静默时段(如23:30-08:00/关)\n/qq活跃 — 回复活跃值0~100\n/qq限流 — 每分钟放行条数+冷却\n/qq要@ — 群聊必须@才回(开/关)\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili拉黑 — 手动拉黑\n/bili解黑 — 解除拉黑\n/bili黑名单 — 查看黑名单\n/bili兴趣 — 查看近期视频口味与已沉淀偏好\n/bili性格 — 查看性格演化\n/bili性格编辑 — 手动编辑性格\n/bili性格删除 — 删除演化条目\n/bili日志 视频 — 主动看视频&评论记录\n/bili日志 番剧 — 看番记录\n/bili日志 动态 — 动态发布记录\n/bili日志 回复 — 评论回复记录\n/bili开关 解析 — 视频解析总开关\n/bili开关 自动解析 — 聊天链接自动解析开关\n/bili开关 手动解析 — /bili解析 命令开关\n/bili开关 LLM解析 — bili_parse_video 工具开关\n/bili开关 解析视频 — 是否发送原视频切片\n/bili开关 筛选 — 主动看视频前标题筛选\n/bili开关 直播回复 — 直播间弹幕互动开关\n/bili联动 — 查看直播伴侣联动状态\n/bili看番 — 手动触发看番\n/bili番剧记忆 — 查看追番进度\n/bili永久记忆 — 查看/删除永久记忆\n/bili动态 — 手动发动态\n/bili绑定 — 绑定QQ与B站UID\n/bili解绑 — 解除绑定\n/bili清理 — 清理临时文件\n/bili帮助 — 本帮助\n/biliUMO — 获取当前UMO并自动填入配置\n━━━━━━━━━━━━\n💡 首次用 /bili登录\n💡 视频池配置不会背编号时，用 /bili分区 查中文填法")
+        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili直播 — 进入指定直播间参与弹幕互动\n/bili计划 — 查看今日主动/动态/看番时间\n/bili分区 — 查看视频池中文填法和分区名\n/bili启动 — 启动\n/bili停止 — 停止\n/bili主动 — 立刻触发一次主动看视频\n/bili解析 [链接/BV号] — 解析指定、引用或上一个视频\n/bili开关 — 功能开关\n/bili模式 — 切换B站评论人设(温和/毒舌)\n/qq模式 — 切换QQ聊天人格(常规/简单/贴吧)\n/qq设置 — 查看QQ风控配置\n/qq静默 — 设置静默时段(如23:30-08:00/关)\n/qq活跃 — 回复活跃值0~100\n/qq限流 — 每分钟放行条数+冷却\n/qq要@ — 群聊必须@才回(开/关)\n/qq人格 — 查看AstrBot人格(限白名单)\n/qq知识库 — 查看知识库文档(限白名单)\n/qq白名单 — 管理可查看条目\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili拉黑 — 手动拉黑\n/bili解黑 — 解除拉黑\n/bili黑名单 — 查看黑名单\n/bili兴趣 — 查看近期视频口味与已沉淀偏好\n/bili性格 — 查看性格演化\n/bili性格编辑 — 手动编辑性格\n/bili性格删除 — 删除演化条目\n/bili日志 视频 — 主动看视频&评论记录\n/bili日志 番剧 — 看番记录\n/bili日志 动态 — 动态发布记录\n/bili日志 回复 — 评论回复记录\n/bili开关 解析 — 视频解析总开关\n/bili开关 自动解析 — 聊天链接自动解析开关\n/bili开关 手动解析 — /bili解析 命令开关\n/bili开关 LLM解析 — bili_parse_video 工具开关\n/bili开关 解析视频 — 是否发送原视频切片\n/bili开关 筛选 — 主动看视频前标题筛选\n/bili开关 直播回复 — 直播间弹幕互动开关\n/bili联动 — 查看直播伴侣联动状态\n/bili看番 — 手动触发看番\n/bili番剧记忆 — 查看追番进度\n/bili永久记忆 — 查看/删除永久记忆\n/bili动态 — 手动发动态\n/bili绑定 — 绑定QQ与B站UID\n/bili解绑 — 解除绑定\n/bili清理 — 清理临时文件\n/bili帮助 — 本帮助\n/biliUMO — 获取当前UMO并自动填入配置\n━━━━━━━━━━━━\n💡 首次用 /bili登录\n💡 视频池配置不会背编号时，用 /bili分区 查中文填法")
 
     # ===== QQ↔B站 记忆互通 =====
     @filter.command("bili绑定")
