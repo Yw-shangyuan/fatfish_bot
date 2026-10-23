@@ -1758,5 +1758,23 @@
     "type": "int",
     "default": 5,
     "hint": "建议 3-8"
+  },
+  "CURRENT_MODE": {
+    "description": "【模式系统】当前激活的人设模式",
+    "type": "string",
+    "default": "normal",
+    "hint": "由 /bili模式 命令切换，正常情况不要手改。模式文件在插件 modes/ 目录，plugin_data/modes/ 可放同名覆盖版本。"
+  },
+  "OWNER_WORTHY_GATE": {
+    "description": "【模式系统】主人消息理解闸门总开关",
+    "type": "bool",
+    "default": true,
+    "hint": "仅对开了 owner_gate 的模式生效（默认常规模式）：回复主人前先判定看不看得懂/接不接得住，接不住就静默；判定失败自动放行不漏答。"
+  },
+  "MODE_PERSONA_ID": {
+    "description": "【模式系统】模式热换绑定的 AstrBot 人格名",
+    "type": "string",
+    "default": "宇文尚元的蓝色大肥鱼",
+    "hint": "必须与 agent_runner 当前引用的人格一致，否则切的不是这只鲸。一般不用改。"
   }
 }

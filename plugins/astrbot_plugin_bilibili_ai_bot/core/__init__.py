@@ -28,6 +28,7 @@ _EXPORTS: dict[str, str] = {
     "ScheduleMixin": "schedule_mixin",
     "WeeklySummaryMixin": "weekly",
     "ShareMixin": "share",
+    "ModeMixin": "modes",
     "PrivateMessageMixin": "private_messages",
     "LiveDanmakuMixin": "live_danmaku",
     "ConsolidationEngine": "consolidation",
@@ -69,6 +70,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查器看见真实符号
     from .llm import LLMMixin
     from .memory import MemoryMixin
     from .memory_api import BiliBotMemoryAPI
+    from .modes import ModeMixin
     from .layered_runtime import LayeredRuntime
     from .personality import PersonalityMixin
     from .private_messages import PrivateMessageMixin

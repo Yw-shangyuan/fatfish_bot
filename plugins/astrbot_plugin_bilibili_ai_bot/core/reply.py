@@ -109,11 +109,20 @@ class ReplyMixin:
         return supported & allowed if self.config.get("BILI_TOOL_ISOLATION_ENABLED", True) else supported
 
     async def _should_reply_by_interest(self, content, username, channel="comment"):
-        if not self.config.get("ENABLE_INTEREST_BASED_REPLY", True):
-            return True, "interest_filter_disabled"
-        if channel == "private" and not self.config.get("INTEREST_APPLY_TO_PRIVATE", True):
-            return True, "private_interest_filter_disabled"
-        prompt = f"""判断一个B站角色是否值得回复下面这条{('私信' if channel == 'private' else '评论')}。
+        if channel == "owner":
+            # 主人消息闸门：判定“看不看得懂/接不接得住”，与兴趣筛选共用解析逻辑。
+            prompt = f"""你是"大肥鱼"本人。下面是主人刚发来的消息。判断你能不能看懂这条消息、能不能自然地接下去。
+只输出严格 JSON：{{"reply":true,"reason":"不超过30字"}}。
+- 缺少主语、指代不明、上下文缺失，靠猜也不知道主人在说什么 → false
+- 没十足把握但能猜到大致意思，或可以反问一句接着聊 → true
+- 明确的指令、提问、分享、闲聊话题 → true
+内容：{str(content)[:800]}"""
+        else:
+            if not self.config.get("ENABLE_INTEREST_BASED_REPLY", True):
+                return True, "interest_filter_disabled"
+            if channel == "private" and not self.config.get("INTEREST_APPLY_TO_PRIVATE", True):
+                return True, "private_interest_filter_disabled"
+            prompt = f"""判断一个B站角色是否值得回复下面这条{('私信' if channel == 'private' else '评论')}。
 只输出严格 JSON：{{"reply":true,"reason":"不超过30字"}}。
 选择规则：{str(self.config.get('INTEREST_SELECTION_PROMPT', ''))[:900]}
 用户：{str(username)[:40]}
@@ -128,6 +137,9 @@ class ReplyMixin:
                 return data["reply"], str(data.get("reason") or "模型兴趣判断")[:80]
         except Exception as exc:
             logger.debug(f"[BiliBot] 兴趣筛选解析失败，使用确定性回退：{exc}")
+        if channel == "owner":
+            # 闸门判定失败时放行：对主人宁可多答，不可漏答。
+            return True, "owner_gate_fail_open"
         compact = self._normalized_interaction_text(content)
         fallback = len(compact) >= 8 or bool(re.search(r"[?？]|怎么|为什么|觉得|喜欢|推荐|请问", str(content)))
         return fallback, "deterministic_interest_fallback"

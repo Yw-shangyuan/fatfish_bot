@@ -17,7 +17,7 @@ from .core import (
     AffectionMixin, PersonalityMixin, BilibiliAPIMixin,
     BangumiMixin, WebSearchMixin, VideoMixin, ReplyMixin,
     ProactiveMixin, DynamicMixin, ScheduleMixin, WeeklySummaryMixin, ShareMixin,
-    PrivateMessageMixin, LiveDanmakuMixin, ConsolidationEngine, BiliBotMemoryAPI,
+    ModeMixin, PrivateMessageMixin, LiveDanmakuMixin, ConsolidationEngine, BiliBotMemoryAPI,
     EventRuntime, LayeredRuntime,
 )
 
@@ -35,7 +35,7 @@ if os.path.isdir(_astrbot_site_packages) and _astrbot_site_packages not in sys.p
     sys.path.insert(0, _astrbot_site_packages)
 
 @register("astrbot_plugin_bilibili_ai_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布、LLM工具调用","1.6.1","https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot")
-class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, AffectionMixin, PersonalityMixin, BilibiliAPIMixin, BangumiMixin, WebSearchMixin, VideoMixin, ReplyMixin, ProactiveMixin, DynamicMixin, ScheduleMixin, WeeklySummaryMixin, ShareMixin, PrivateMessageMixin, LiveDanmakuMixin):
+class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, AffectionMixin, PersonalityMixin, BilibiliAPIMixin, BangumiMixin, WebSearchMixin, VideoMixin, ReplyMixin, ProactiveMixin, DynamicMixin, ScheduleMixin, WeeklySummaryMixin, ShareMixin, ModeMixin, PrivateMessageMixin, LiveDanmakuMixin):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
@@ -866,6 +866,58 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             elif cur:
                 await self._stop_live_danmaku_listener()
         yield event.plain_result(f"{name}: {'✅ 已开启' if not cur else '❌ 已关闭'}")
+
+    # ===== 人设模式 =====
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=60)
+    async def on_owner_worthy_gate(self, event: AstrMessageEvent):
+        """常规模式下，主人的纯文本消息先过一道“看不看得懂/值不值得接”闸门。
+
+        接不住时 stop_event 保持静默，避免肥鱼没听懂还硬回一句“我没看懂”；
+        命令、空文本、未唤醒机器人的群消息不判定；判定失败时放行（宁可多答不漏答）。
+        """
+        if not self.config.get("OWNER_WORTHY_GATE", True):
+            return
+        if not self._mode_owner_gate_enabled():
+            return
+        try:
+            if not event.is_admin():
+                return
+            if event.get_platform_name() == "webchat":
+                return
+        except Exception:
+            return
+        text = str(event.message_str or "").strip()
+        if not text or text.startswith("/") or len(text) > 800:
+            return
+        if not event.is_at_or_wake_command:
+            return
+        ok, reason = await self._should_reply_by_interest(text, "主人", channel="owner")
+        if not ok:
+            event.stop_event()
+            logger.info(f"[BiliBot] 主人消息闸门静默：{str(reason)[:60]}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("bili模式")
+    async def cmd_modes(self, event: AstrMessageEvent):
+        parts = event.message_str.strip().split(maxsplit=1)
+        modes = self._modes_load(refresh=True)
+        cur = self._current_mode_key()
+        if len(parts) < 2:
+            lines = ["🐳 可切换的人设模式："]
+            for k, cfg in modes.items():
+                mark = "  ← 当前" if k == cur else ""
+                lines.append(f"  {cfg.get('name') or k}{mark}")
+                if cfg.get("desc"):
+                    lines.append(f"    {cfg['desc']}")
+            lines += ["", "用法: /bili模式 <模式名>", "提示: 切换即时生效，不影响B站侧人设与行为。"]
+            yield event.plain_result("\n".join(lines))
+            return
+        key = self._mode_find(modes, parts[1])
+        if not key:
+            names = "、".join(str(c.get("name") or k) for k, c in modes.items())
+            yield event.plain_result(f"❌ 不认识的模式：{parts[1]}\n可选项：{names}")
+            return
+        yield event.plain_result(await self._mode_apply(key))
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili刷新")
     async def cmd_refresh_cookie(self, event: AstrMessageEvent):
@@ -1529,7 +1581,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
 
     @filter.command("bili帮助")
     async def cmd_help(self, event: AstrMessageEvent):
-        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili直播 — 进入指定直播间参与弹幕互动\n/bili计划 — 查看今日主动/动态/看番时间\n/bili分区 — 查看视频池中文填法和分区名\n/bili启动 — 启动\n/bili停止 — 停止\n/bili主动 — 立刻触发一次主动看视频\n/bili解析 [链接/BV号] — 解析指定、引用或上一个视频\n/bili开关 — 功能开关\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili拉黑 — 手动拉黑\n/bili解黑 — 解除拉黑\n/bili黑名单 — 查看黑名单\n/bili兴趣 — 查看近期视频口味与已沉淀偏好\n/bili性格 — 查看性格演化\n/bili性格编辑 — 手动编辑性格\n/bili性格删除 — 删除演化条目\n/bili日志 视频 — 主动看视频&评论记录\n/bili日志 番剧 — 看番记录\n/bili日志 动态 — 动态发布记录\n/bili日志 回复 — 评论回复记录\n/bili开关 解析 — 视频解析总开关\n/bili开关 自动解析 — 聊天链接自动解析开关\n/bili开关 手动解析 — /bili解析 命令开关\n/bili开关 LLM解析 — bili_parse_video 工具开关\n/bili开关 解析视频 — 是否发送原视频切片\n/bili开关 筛选 — 主动看视频前标题筛选\n/bili开关 直播回复 — 直播间弹幕互动开关\n/bili联动 — 查看直播伴侣联动状态\n/bili看番 — 手动触发看番\n/bili番剧记忆 — 查看追番进度\n/bili永久记忆 — 查看/删除永久记忆\n/bili动态 — 手动发动态\n/bili绑定 — 绑定QQ与B站UID\n/bili解绑 — 解除绑定\n/bili清理 — 清理临时文件\n/bili帮助 — 本帮助\n/biliUMO — 获取当前UMO并自动填入配置\n━━━━━━━━━━━━\n💡 首次用 /bili登录\n💡 视频池配置不会背编号时，用 /bili分区 查中文填法")
+        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili直播 — 进入指定直播间参与弹幕互动\n/bili计划 — 查看今日主动/动态/看番时间\n/bili分区 — 查看视频池中文填法和分区名\n/bili启动 — 启动\n/bili停止 — 停止\n/bili主动 — 立刻触发一次主动看视频\n/bili解析 [链接/BV号] — 解析指定、引用或上一个视频\n/bili开关 — 功能开关\n/bili模式 — 切换人设模式(常规/简单/贴吧)\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili拉黑 — 手动拉黑\n/bili解黑 — 解除拉黑\n/bili黑名单 — 查看黑名单\n/bili兴趣 — 查看近期视频口味与已沉淀偏好\n/bili性格 — 查看性格演化\n/bili性格编辑 — 手动编辑性格\n/bili性格删除 — 删除演化条目\n/bili日志 视频 — 主动看视频&评论记录\n/bili日志 番剧 — 看番记录\n/bili日志 动态 — 动态发布记录\n/bili日志 回复 — 评论回复记录\n/bili开关 解析 — 视频解析总开关\n/bili开关 自动解析 — 聊天链接自动解析开关\n/bili开关 手动解析 — /bili解析 命令开关\n/bili开关 LLM解析 — bili_parse_video 工具开关\n/bili开关 解析视频 — 是否发送原视频切片\n/bili开关 筛选 — 主动看视频前标题筛选\n/bili开关 直播回复 — 直播间弹幕互动开关\n/bili联动 — 查看直播伴侣联动状态\n/bili看番 — 手动触发看番\n/bili番剧记忆 — 查看追番进度\n/bili永久记忆 — 查看/删除永久记忆\n/bili动态 — 手动发动态\n/bili绑定 — 绑定QQ与B站UID\n/bili解绑 — 解除绑定\n/bili清理 — 清理临时文件\n/bili帮助 — 本帮助\n/biliUMO — 获取当前UMO并自动填入配置\n━━━━━━━━━━━━\n💡 首次用 /bili登录\n💡 视频池配置不会背编号时，用 /bili分区 查中文填法")
 
     # ===== QQ↔B站 记忆互通 =====
     @filter.command("bili绑定")
