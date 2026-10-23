@@ -4,10 +4,11 @@ import base64
 import json
 import re
 import shutil
+import aiohttp
 from .video_diagnostics import media_failure, get_call_diagnostic, set_call_diagnostic, exception_detail, safe_detail
 from datetime import datetime
 from astrbot.api import logger
-from .network import download_proxy_args, redact_proxy_error
+from .network import download_proxy_args, redact_proxy_error, plugin_http_session
 from .config import VIDEO_MEMORY_FILE, TEMP_VIDEO_DIR, EXTERNAL_MEMORY_FILE
 
 
@@ -780,8 +781,112 @@ UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}
         candidates.sort(reverse=True)
         return candidates[0][2]
 
+    async def _download_video_via_api(self, bvid, max_height=480):
+        """用 playurl API 直取媒体流下载视频。
+
+        机房 IP 走网页解析（yt-dlp）常被 B 站 WAF 以 412 拦截，
+        而 api.bilibili.com 带 cookies 请求畅通，可直接拿到 DASH 流地址。
+
+        Args:
+            bvid: 视频 BV 号。
+            max_height: 可选流的最高分辨率。
+
+        Returns:
+            合成后的 mp4 文件路径；任何一步失败返回 None（由调用方回退 yt-dlp）。
+        """
+        v_path = os.path.join(TEMP_VIDEO_DIR, f"{bvid}_api_v.m4s")
+        a_path = os.path.join(TEMP_VIDEO_DIR, f"{bvid}_api_a.m4s")
+        out_path = os.path.join(TEMP_VIDEO_DIR, f"{bvid}.mp4")
+        try:
+            cookie_header = "; ".join(
+                f"{name}={self.config.get(ckey, '')}"
+                for name, ckey in (
+                    ("SESSDATA", "SESSDATA"), ("bili_jct", "BILI_JCT"),
+                    ("DedeUserID", "DEDE_USER_ID"), ("buvid3", "BUVID3"), ("buvid4", "BUVID4"),
+                )
+                if self.config.get(ckey, "")
+            )
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Referer": f"https://www.bilibili.com/video/{bvid}",
+                "Cookie": cookie_header,
+            }
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with plugin_http_session(self.config) as session:
+                async with session.get(
+                    "https://api.bilibili.com/x/web-interface/view",
+                    params={"bvid": bvid}, headers=headers, timeout=timeout,
+                ) as resp:
+                    view = await resp.json(content_type=None)
+                cid = (view.get("data") or {}).get("cid")
+                if not cid:
+                    logger.warning(f"[BiliBot] playurl 取 cid 失败({bvid}): code={view.get('code')}")
+                    return None
+                async with session.get(
+                    "https://api.bilibili.com/x/player/playurl",
+                    params={"bvid": bvid, "cid": cid, "fnval": 16, "fourk": 1},
+                    headers=headers, timeout=timeout,
+                ) as resp:
+                    play = await resp.json(content_type=None)
+                dash = (play.get("data") or {}).get("dash") or {}
+                videos = dash.get("video") or []
+                if not videos:
+                    logger.warning(f"[BiliBot] playurl 未返回视频流({bvid}): code={play.get('code')}")
+                    return None
+                fits = [s for s in videos if (s.get("height") or 0) <= max_height] or videos
+                # 优先 avc（兼容性最好），再按带宽从高到低
+                fits.sort(key=lambda s: ("avc" not in str(s.get("codecs", "")).lower(), -(s.get("bandwidth") or 0)))
+                v = fits[0]
+                audios = dash.get("audio") or []
+                a = max(audios, key=lambda s: s.get("bandwidth") or 0) if audios else None
+                if (v.get("size") or 0) > 400 * 1024 * 1024:
+                    logger.warning(f"[BiliBot] playurl 选中流过大({bvid}): {(v.get('size') or 0) // 1048576}MB，放弃 API 路径")
+                    return None
+                stream_timeout = aiohttp.ClientTimeout(total=180)
+                for url, dst in ((v.get("baseUrl") or v.get("base_url"), v_path),
+                                 (a and (a.get("baseUrl") or a.get("base_url")), a_path)):
+                    if not url:
+                        continue
+                    async with session.get(url, headers=headers, timeout=stream_timeout) as resp:
+                        if resp.status != 200:
+                            logger.warning(f"[BiliBot] playurl 流下载失败({bvid}): HTTP {resp.status}")
+                            return None
+                        with open(dst, "wb") as f:
+                            async for chunk in resp.content.iter_chunked(1 << 20):
+                                f.write(chunk)
+        except Exception as e:
+            logger.warning(f"[BiliBot] playurl 下载异常({bvid}): {safe_detail(e, self.config)[:150]}")
+            for tmp in (v_path, a_path):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            return None
+        # ffmpeg 无损合流；音频缺失时只封装视频流
+        args = ["ffmpeg", "-y", "-i", v_path]
+        if os.path.isfile(a_path):
+            args += ["-i", a_path, "-map", "0:v:0", "-map", "1:a:0"]
+        args += ["-c", "copy", "-movflags", "+faststart", out_path]
+        code, _, stderr = await self._run_process(*args, timeout=180)
+        for tmp in (v_path, a_path):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        if code != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+            logger.warning(f"[BiliBot] playurl 合流失败({bvid}): {(stderr or 'ffmpeg 无输出')[-150:]}")
+            return None
+        logger.info(
+            f"[BiliBot] playurl API 下载成功({bvid})，"
+            f"流 {v.get('width')}x{v.get('height')}，文件: {os.path.basename(out_path)}"
+        )
+        return out_path
+
     async def _download_video(self, bvid, max_height=480):
         set_call_diagnostic()
+        api_fp = await self._download_video_via_api(bvid, max_height)
+        if api_fp:
+            return api_fp
         proxy_args = download_proxy_args(self.config)
         output_template = os.path.join(TEMP_VIDEO_DIR, f"{bvid}.%(ext)s")
         # 生成 Netscape 格式 cookie 文件，兼容新版 yt-dlp
