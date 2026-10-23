@@ -4,7 +4,7 @@ set -e
 SRC=/home/ubuntu/AstrBot/data/plugins
 DST=/home/ubuntu/bot-src
 rsync -a --delete --exclude .git --exclude __pycache__ --exclude "*.pyc" "$SRC/" "$DST/plugins/"
-for f in deploy.sh grab.py sentinel.py backup-src.sh; do [ -f "/home/ubuntu/$f" ] && cp -f "/home/ubuntu/$f" "$DST/ops/" || true; done
+for f in /home/ubuntu/deploy.sh /home/ubuntu/grab.py /home/ubuntu/ops/sentinel.py /home/ubuntu/backup-src.sh; do [ -f "$f" ] && cp -f "$f" "$DST/ops/" || true; done
 cp -f /etc/systemd/system/astrbot.service "$DST/ops/" 2>/dev/null || true
 cd "$DST"
 git add -A
