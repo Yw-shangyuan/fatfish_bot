@@ -245,6 +245,7 @@ class ProactiveCompanion(Star):
 
     # ───────────────────────────── 命令 ─────────────────────────────
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("proactive")
     async def command_main(self, event: AstrMessageEvent):
         """/proactive 绑定|解绑|状态|开|关|测试 —— 管理主动伴聊。"""
