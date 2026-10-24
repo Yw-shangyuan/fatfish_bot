@@ -996,6 +996,25 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         active = (start <= cur < end) if start < end else (cur >= start or cur < end)
         return active, spec
 
+    @staticmethod
+    def _qq_is_command(event) -> bool:
+        """命令识别：群里 "@肥鱼 /cmd" 或 "/cmd" 经 AstrBot 唤醒阶段后，
+        message_str 会被剥掉 "/" 前缀，需从原始消息组件里的文本判断。"""
+        if str(event.message_str or "").strip().startswith("/"):
+            return True
+        try:
+            for comp in event.get_messages() or []:
+                text = getattr(comp, "text", None)
+                if text is None:
+                    continue
+                t = text.strip()
+                if not t:
+                    continue
+                return t.startswith("/")
+        except Exception:
+            pass
+        return False
+
     @filter.event_message_type(filter.EventMessageType.ALL, priority=65)
     async def on_qq_safety_gate(self, event: AstrMessageEvent):
         """QQ 侧风控安全闸门：静默时段(仅群聊) -> 要@(仅群聊) -> 发送限流。
@@ -1008,7 +1027,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                 return
         except Exception:
             return
-        if str(event.message_str or "").strip().startswith("/"):
+        if self._qq_is_command(event):
             return
         # Stale check must read the platform raw event: AstrBot overwrites
         # message_obj.timestamp with convert time, hiding the real send time.
