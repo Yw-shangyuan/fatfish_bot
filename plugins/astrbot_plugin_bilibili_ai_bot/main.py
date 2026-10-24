@@ -31,6 +31,7 @@ _QQ_VIEW_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath
 # AiocqhttpMessageEvent.send_message, so one class-level wrapper enforces a
 # hard minimum gap regardless of model or persona behaviour.
 QQ_SEND_MIN_GAP = 5.0
+QQ_SEND_MAX_GAP = 12.0
 QQ_SEND_QUEUE_LIMIT = 120.0
 # Stale-message guard: on reconnect QQ redelivers the offline backlog carrying
 # the original sender timestamp in raw_message. Drop anything older than this to
@@ -67,7 +68,8 @@ def install_qq_send_throttle() -> bool:
                     f"(waited {queued:.0f}s)"
                 )
                 return
-            wait = QQ_SEND_MIN_GAP - (time.monotonic() - state["last"])
+            gap = random.uniform(QQ_SEND_MIN_GAP, QQ_SEND_MAX_GAP)
+            wait = gap - (time.monotonic() - state["last"])
             if wait > 0:
                 await asyncio.sleep(wait)
             try:
@@ -79,7 +81,7 @@ def install_qq_send_throttle() -> bool:
     AiocqhttpMessageEvent.send_message = classmethod(paced)
     AiocqhttpMessageEvent._qq_send_paced = True
     logger.info(
-        f"[BiliBot] QQ send throttle armed: min gap {QQ_SEND_MIN_GAP}s, "
+        f"[BiliBot] QQ send throttle armed: gap {QQ_SEND_MIN_GAP}s~{QQ_SEND_MAX_GAP}s (jittered), "
         f"queue limit {QQ_SEND_QUEUE_LIMIT:.0f}s"
     )
     return True
