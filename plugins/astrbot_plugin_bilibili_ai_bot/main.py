@@ -1030,6 +1030,9 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         except Exception:
             pass
         if is_group:
+            if self.config.get("QQ_GROUP_MUTE", False):
+                event.stop_event()
+                return
             if self._qq_quiet_window()[0]:
                 event.stop_event()
                 return
@@ -1067,6 +1070,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             f"活跃值：{int(self.config.get('QQ_ACTIVE_SCORE', 50) or 0)}/100，越高越爱搭话（改法：/qq活跃 30）",
             f"限流：{'关' if per_min <= 0 else f'每分钟最多 {per_min} 条，超限冷却 {cooldown} 秒'}（改法：/qq限流 2 180 或 /qq限流 0 0）",
             f"群聊要@：{'✅ 开（没@肥鱼一律不理，含主人）' if self.config.get('QQ_NEED_AT', False) else '关'}（改法：/qq要@ 开/关）",
+            f"群聊回复：{'🔇 全禁（群里说什么都不理）' if self.config.get('QQ_GROUP_MUTE', False) else '🔊 正常'}（改法：/qq群聊 开/关）",
             f"当前 QQ 模式：{self.config.get('QQ_MODE', 'normal')}（改法：/qq模式）",
             "注：静默与要@只限制群聊，私聊永远理主人；/ 开头命令永远放行。",
         ]
@@ -1164,6 +1168,26 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         self.config["QQ_NEED_AT"] = on
         self.config.save_config()
         yield event.plain_result("✅ 群聊要@已开启：没 @ 肥鱼的话人家装死给你看，喵~" if on else "✅ 群聊要@已关闭：恢复自由搭话模式")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq群聊")
+    async def cmd_qq_group_mute(self, event: AstrMessageEvent):
+        toks = event.message_str.strip().split(maxsplit=1)
+        cur = bool(self.config.get("QQ_GROUP_MUTE", False))
+        if len(toks) < 2:
+            yield event.plain_result(f"当前群聊回复：{'🔇 全禁（群里说什么都不理，@也不理）' if cur else '🔊 正常（按要@/静默规则回复）'}\n用法：/qq群聊 关（全禁）或 /qq群聊 开（恢复回复）")
+            return
+        arg = toks[1].strip()
+        if arg in {"关", "关闭", "off", "0", "禁"}:
+            mute = True
+        elif arg in {"开", "开启", "on", "1"}:
+            mute = False
+        else:
+            yield event.plain_result("❌ 用法：/qq群聊 开（恢复回复）或 /qq群聊 关（群里全禁）")
+            return
+        self.config["QQ_GROUP_MUTE"] = mute
+        self.config.save_config()
+        yield event.plain_result("🔇 群聊全禁已开启：群里说什么本鱼都装死，私聊和命令不受影响" if mute else "🔊 群聊回复已恢复：按要@和静默时段规则正常接话")
 
     # ===== QQ 只读查看器：人格 / 知识库（ADMIN + 仅私聊 + 白名单三道门） =====
     def _qq_view_ro(self, path, sql, args=()):
@@ -2086,11 +2110,15 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
     @filter.on_llm_request()
     async def inject_bili_memory(self, event: AstrMessageEvent, req: ProviderRequest):
         """QQ对话自动注入B站侧记忆：永久记忆 + 语义检索相关记忆"""
-        # 终极闸：群消息在静默时段、或要@模式下没@肥鱼，一律不许走到 LLM。
+        # 终极闸：群消息在群禁模式/静默时段、或要@模式下没@肥鱼，一律不许走到 LLM。
         # 入口闸的 stop_event 可能被未知路径绕过，这里在 LLM 调用点前再拦一次。
         # 命令消息以唤醒词 "/" 开头，is_at_or_wake_command 为 True，不受影响。
         try:
             if event.get_group_id() and event.get_platform_name() != "webchat":
+                if self.config.get("QQ_GROUP_MUTE", False):
+                    logger.info("[BiliBot] LLM veto: group chat muted")
+                    event.stop_event()
+                    return
                 if self._qq_quiet_window()[0]:
                     logger.info("[BiliBot] LLM veto: group msg in quiet hours")
                     event.stop_event()
