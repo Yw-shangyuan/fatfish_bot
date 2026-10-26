@@ -97,12 +97,24 @@ git -C "$WT" commit -qm "data backup $STAMP ($(du -h "$RAW.age" | cut -f1) encry
 git push -q origin "$BR"
 git worktree remove --force "$WT"
 
-# remote rolling: keep 3 branches
-git ls-remote --heads origin "refs/heads/backup-*" | awk '{print $2}' | sed 's|refs/heads/||' | sort | head -n -3 | while read -r b; do
-  git push -q origin --delete "$b" 2>/dev/null || true
-done
+# 保险栓: 新备份必须在远端确认可见, 才有资格动旧备份; 不可见=异常, 立即停止(不进删除环节)
+git ls-remote --heads origin "refs/heads/$BR" | grep -q . || { echo "ERROR: new backup branch not visible on remote, pruning skipped"; exit 1; }
+
+# remote rolling: keep 3 branches (guarded pruning, 2026-10-26)
+# 保险栓: 超额才删; 本轮新分支强制豁免; 删除失败不再静默吞掉, 汇总进微信通知
+DELS=""; DELFAIL=""
+BKLIST=$(git ls-remote --heads origin "refs/heads/backup-*" | awk '{print $2}' | sed 's|refs/heads/||' | sort)
+BK_CNT=$(printf '%s\n' "$BKLIST" | grep -c . || true)
+if [ "${BK_CNT:-0}" -gt 3 ]; then
+  # 排除新分支后剩 N-1 份旧备份, 保留最新2份旧+1份新=共3份, 故 head -n -2
+  DEMLIST=$(printf '%s\n' "$BKLIST" | grep -vx "$BR" | head -n -2 || true)
+  for b in $DEMLIST; do
+    [ -z "$b" ] && continue
+    if git push -q origin --delete "$b"; then DELS="$DELS $b"; else DELFAIL="$DELFAIL $b"; fi
+  done
+fi
 
 OK=1
 MINS=$(( ($(date +%s) - T0) / 60 ))
-notify "✅ 备份完成：$(du -h "$RAW.age" | cut -f1) 加密包已推送到 GitHub 分支 $BR（GitHub保留最近3份，本地7份）。全程${MINS}分钟。"
+notify "✅ 备份完成：$(du -h "$RAW.age" | cut -f1) 加密包已推送到 GitHub 分支 $BR（GitHub保留最近3份，本地7份）。全程${MINS}分钟。🧹 本次删除:${DELS:- 无}${DELFAIL:+ ｜⚠️删除失败:${DELFAIL}}"
 exit 0
