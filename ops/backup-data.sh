@@ -110,7 +110,12 @@ if [ "${BK_CNT:-0}" -gt 3 ]; then
   DEMLIST=$(printf '%s\n' "$BKLIST" | grep -vx "$BR" | head -n -2 || true)
   for b in $DEMLIST; do
     [ -z "$b" ] && continue
-    if git push -q origin --delete "$b"; then DELS="$DELS $b"; else DELFAIL="$DELFAIL $b"; fi
+    if git push -q origin --delete "$b"; then
+      git branch -D "$b" >/dev/null 2>&1 || true   # 同步删本地同名分支: worktree add 会留下本地引用, 不删则 gc 无法释放其对象
+      DELS="$DELS $b"
+    else
+      DELFAIL="$DELFAIL $b"
+    fi
   done
 fi
 
