@@ -27,37 +27,45 @@ notify() {
 
 cleanup() {
   sudo systemctl start astrbot 2>/dev/null || true
-  docker start napcat >/dev/null 2>&1 || true
+  docker start snowluma >/dev/null 2>&1 || true
   rm -f "$MUTEFILE"
   [ "$OK" = "1" ] || notify "❌ 备份失败(exit=$?)，服务已恢复运行。详情看 /home/ubuntu/backups/backup.log"
 }
 trap cleanup EXIT
 
-# 挂哨兵免打扰牌：冷拷贝期间 NapCat 会被主动停止，属于计划内离线
+# 挂哨兵免打扰牌：冷拷贝期间 SnowLuma 会被主动停止，属于计划内离线
 mkdir -p "$(dirname "$MUTEFILE")"
 touch "$MUTEFILE"
 
 # ---- cold snapshot window ----
 sudo systemctl stop astrbot
-docker stop -t 5 napcat >/dev/null
+docker stop -t 5 snowluma >/dev/null
 
 # 只备"有意义的记忆"：数据库/配置/插件数据/登录态。
-# 排除的都是可再生的缓存垃圾（2026-10-26 摸底占比：QQ日志471M、表情缓存154M、
-# NapCat临时47M、AstrBot临时318M），丢了不心疼，重新登录/运行会自动重建。
-tar -I "gzip -1" -cf "$RAW" \
+# 排除的都是可再生的缓存垃圾（日志/表情/崩溃转储），丢了不心疼，
+# 重新登录/运行会自动重建。
+# sudo: snowluma 卷内有 root 属主文件(如 config/vnc-password)，
+# 以 ubuntu 跑 tar 会 Permission denied 并触发 set -e 中断备份（2026-10-28 事故）。
+sudo tar -I "gzip -1" -cf "$RAW" \
   --exclude="home/ubuntu/AstrBot/data/temp" \
   --exclude="home/ubuntu/AstrBot/data/dist" \
   --exclude="home/ubuntu/AstrBot/data/dashboard.zip" \
   --exclude="*__pycache__*" \
   --exclude="*.pyc" \
+  --exclude="*.log" \
   --exclude="srv/napcat/qqdata/global/nt_data/Log" \
   --exclude="srv/napcat/qqdata/global/nt_data/Emoji" \
   --exclude="srv/napcat/qqdata/NapCat/temp" \
   --exclude="srv/napcat/qqdata/Crashpad" \
   --exclude="srv/napcat/qqdata/crash_files" \
-  -C / home/ubuntu/AstrBot/data srv/napcat etc/systemd/system/astrbot.service
+  --exclude="srv/snowluma/local/*/Log" \
+  --exclude="srv/snowluma/local/*/log" \
+  --exclude="srv/snowluma/local/*/*Log*" \
+  --exclude="srv/snowluma/local/*/Crashpad" \
+  --exclude="srv/snowluma/data/temp" \
+  -C / home/ubuntu/AstrBot/data srv/napcat srv/snowluma etc/systemd/system/astrbot.service
 
-docker start napcat >/dev/null
+docker start snowluma >/dev/null
 sudo systemctl start astrbot
 # ---- snapshot window ends ----
 
@@ -82,7 +90,7 @@ cp "$RAW.age.sha256" "$WT/"
 {
   echo "# 大肥鱼数据备份 $STAMP"
   echo "解密: age -d -i fatfish_age_identity.txt $BASE.age > $BASE"
-  echo "还原: tar xzf $BASE 后按内部相对路径盖回 / 原位置, 再重启 astrbot 与 napcat"
+  echo "还原: tar xzf $BASE 后按内部相对路径盖回 / 原位置, 再重启 astrbot 与 snowluma"
   echo "若被拆分为 part 文件: cat *.part-* | cat > $BASE 先合并再解密"
   echo "sha256 校验文件: $BASE.sha256 (对合并解密后的包校验)"
 } > "$WT/RESTORE-README.txt"

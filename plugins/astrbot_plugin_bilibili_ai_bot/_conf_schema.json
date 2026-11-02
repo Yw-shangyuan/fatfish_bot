@@ -253,6 +253,12 @@
     "default": false,
     "hint": "首次开启只建立当前位置并跳过历史私信；之后仅处理纯文字和B站视频分享卡片。"
   },
+  "QQ_PRIVATE_CONTACT_GATE": {
+    "description": "【QQ私聊】陌生人闸门：仅主人与 /qq联系人 名单内的QQ号私聊会被回复",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后其余QQ号的私聊一律静默（命令与群聊不受影响）；名单用 /qq联系人 维护，存插件数据目录 contacts.json。"
+  },
   "PRIVATE_MESSAGE_REPLY_SCOPE": {
     "description": "【B站私信·回复】允许自动回复哪些人",
     "type": "string",
@@ -1796,6 +1802,30 @@
     "min": 0,
     "max": 100,
     "hint": "调整主人消息闸门的松紧：低=从严（爱答不理），高=从宽（有话就接）。由 /qq活跃 命令设置。"
+  },
+  "QQ_GROUP_OWNER_WILLING": {
+    "description": "【风控旋钮】群聊中对主人消息的回复意愿值 0-100",
+    "type": "int",
+    "default": 100,
+    "min": 0,
+    "max": 100,
+    "hint": "100=群里的话必回（零判定成本）；低于100时由LLM给消息打0-100价值分，超过(100-意愿值)才回。只影响群聊，私聊永远理主人。由 /qq意愿 命令设置。"
+  },
+  "QQ_GROUP_OWNER_CTX": {
+    "description": "【风控旋钮】群主人评分的上下文条数上限 0-10",
+    "type": "int",
+    "default": 5,
+    "min": 0,
+    "max": 10,
+    "hint": "评分默认附带最近3条群消息；主人5秒内连发的消息会全部压进上下文，总和不超本上限。0=不带上下文。由 /qq上下文 命令设置。"
+  },
+  "QQ_GROUP_GUEST_WILLING": {
+    "description": "【风控旋钮】群聊中对群友消息的回复意愿值 0-100",
+    "type": "int",
+    "default": 100,
+    "min": 0,
+    "max": 100,
+    "hint": "100=群友消息都回（维持现状）；低于100时由LLM给群友消息打0-100价值分，超过(100-意愿值)才回，被@肥鱼的消息必高分。被拦消息零LLM花费。只影响群聊，主人消息不受影响。由 /qq群友意愿 命令设置。"
   },
   "QQ_RATE_PER_MIN": {
     "description": "【风控旋钮】每分钟最多放行的回复数",

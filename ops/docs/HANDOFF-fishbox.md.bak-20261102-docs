@@ -1,0 +1,115 @@
+# 鱼箱（fishbox）交接文档
+
+更新时间：2026-11-02 11:22 CST
+用途：把当前状态、待改项、坑点交接给下一个 agent 或人工接手。
+
+---
+
+## 1. 一句话现状
+
+沙箱在跑、能调工具；桥接插件代码写完并做过离线验证，**但 11:18 改完还没重启，最新版没被加载**。
+
+---
+
+## 2. 目录与文件
+
+| 路径 | 说明 |
+| --- | --- |
+| /home/ubuntu/fishbox/ | 沙箱主体（executor.py、server.py、client.py、tools/、cache/、run_server.sh、server.log） |
+| /home/ubuntu/fishbox/fishbox.sock | unix socket，权限 0600，bot 侧唯一入口 |
+| /home/ubuntu/fishbox/tools/<name>/ | 工具目录：manifest.json + main.py + selftest.py |
+| /home/ubuntu/fishbox/cache/<name>/ | 工具唯一可写目录（卡库缓存在这里） |
+| /home/ubuntu/AstrBot/data/plugins/astrbot_plugin_fishbox/ | 桥接插件（main.py、metadata.yaml） |
+| /home/ubuntu/AstrBot/data/logs/astrbot.log | AstrBot 主日志 |
+| /home/ubuntu/fishbox/server.log | 沙箱启动日志 |
+
+---
+
+## 3. 已完成
+
+### 3.1 沙箱层
+- executor.py：子进程执行，清空环境变量（只留 PATH、FISHBOX_*），cwd 锁在工具目录，RLIMIT 限 CPU/内存 512M/单文件 16M/句柄 64，stdout 截断，超时按 manifest。
+- server.py：unix socket 薄接口，`action=list|run`，工具名严格白名单（不在 tools 目录直接拒绝）。
+- client.py：只依赖标准库，`client.tools()` / `client.run(name, args)`。
+- 自启：crontab 已有两条（勿重复添加）
+  - `@reboot sleep 20; flock -n /tmp/fishbox.lock /home/ubuntu/fishbox/run_server.sh`
+  - `* * * * * flock -n /tmp/fishbox.lock /home/ubuntu/fishbox/run_server.sh`
+- 运行中的进程：`/usr/bin/python3 server.py`（cwd=/home/ubuntu/fishbox）。**必须用这个解释器启动**，`run_server.sh` 用 pgrep 匹配 `python3 server.py`，换成 venv 解释器会被误判成没跑，导致重复启动。
+
+### 3.2 现有工具
+- `echo`：回声，验证链路用。
+- `hearthstone_deck`：炉石卡组码解码。
+  - 数据：首次运行从 `https://api.hearthstonejson.com/v1/latest/zhCN/cards.json` 拉约 10MB，落到 `cache/hearthstone_deck/cards_zhcn.json`，之后离线。
+  - 算法：base64 → varint → 跳过 3 字节头 → 第二组为英雄 dbfId → 按组读卡牌 dbfId（组号即张数）→ 映射卡名/费用并排序。
+  - 输入：`{"code":"AAEC..."}`；输出：`{"hero":..., "total":..., "cards":[{"cost","name","count"}]}`
+
+### 3.3 桥接插件（astrbot_plugin_fishbox 0.1.0）
+- `/鱼箱列表`：列工具（仅主人或管理员）。
+- `/鱼箱 <工具名> <JSON参数>`：调工具（仅主人或管理员）。
+- 群内 @ 自动识码：群消息里 @ 了机器人且含卡组码 → 自动解析并回复，回复后 `stop_event()`，不再走 LLM。
+- 认码规则：`(?<![A-Za-z0-9])AA[A-Za-z0-9+/]{38,220}(?![A-Za-z0-9])`，另加字符种类 ≥10 的判据（防一串 A 误判）。
+- 限流（常量在 main.py 顶部，可调）：
+  - `DECK_COOLDOWN = 60.0`：同一个码同群 60 秒只回一次
+  - `DECK_GAP = 10.0`：不同码之间至少 10 秒
+  - `DECK_HOURLY_CAP = 30`：每群每小时最多解析 30 套
+  - 超限回复：`当时段解析卡组打到上限，冷却时间至：HH:MM（约 N 分钟后恢复）`，提示本身 60 秒限流一次
+- 已验证：语法编译通过；用桩模块冻结时间跑过闸门单测（同码跳过、换码 10 秒、满 30 套转上限、冷却剩余计算正确）；真实卡组码跑通沙箱，解出「瓷娃娃斯嘉丽 · 8 张」。
+- **未验证**：真机群聊 @ 触发的实际效果（要重启后才能验）。
+
+---
+
+## 4. 待办（按优先级）
+
+### P0 重启加载最新插件
+- 现状：`main.py` 修改时间 11:18，AstrBot 启动时间 11:04:45，所以自动识码那段还没生效。
+- 做法：`sudo systemctl restart astrbot`（约 10~20 秒，QQ 短暂离线）。
+- 验收：群里 @ 机器人 + 发一段卡组码，应直接回卡组；`/鱼箱列表` 应回两条工具。
+
+### P1 多码处理
+- 现状：`DECK_RE.search()` 只取第一个匹配，一句话里多个码只解第一个，其余静默忽略。
+- 建议改法：改 `findall`，一条消息最多取 3 个去重后的码，合并成一条回复；配额仍按「一条消息算一次」扣。注意 `DECK_GAP` 的判定要用「本次请求时间」而不是每个码各算一次。
+
+### P2 真隔离（需 sudo，人工执行）
+- 现在只是限流，不是断网。建议二选一：
+  - systemd 单元跑 server.py，加 `ProtectSystem=strict`、`PrivateNetwork=yes`、`ReadWritePaths=/home/ubuntu/fishbox/cache`
+  - 或 bwrap 包一层：`bwrap --unshare-net --ro-bind /usr /usr --ro-bind /home/ubuntu/fishbox/tools ... python3 server.py`
+- 注意：`hearthstone_deck` 首次下载卡库需要联网，断网前要先预热 cache。
+
+### P3 工具编写流程
+- 目前没有「AI 写工具」的入口，只能人工往 `tools/` 里放。
+- 建议：新增提案工具（写草稿到 `cache/proposals/`）+ selftest 自动跑 + 人工点头后移入 `tools/`；别让模型直接写 `tools/`。
+
+### P4 权限收敛
+- 现状：群里任何人 @ 机器人就能触发解析（受 30 套/时限流）。
+- 如需收紧：加群白名单，或要求「@ + 指定前缀」才触发。
+
+### P5 可观测
+- 现状：工具调用无日志，只有沙箱崩溃才看得出来。
+- 建议：server.py 落一行调用日志（时间、工具、耗时、成功与否），供 sentinel.py 巡检。
+
+---
+
+## 5. 坑（都是踩过的）
+
+1. **别 rm -rf /home/ubuntu/fishbox**：11:02 曾删过一次目录，旧进程还活着但 cwd 成 `(deleted)`，出现两个 server 抢 socket。重建时先 kill 旧进程。
+2. crontab 里鱼箱的两条保活已在，不要重复加 `@reboot`，否则会双启。
+3. `run_server.sh` 的解释器要与 cron 一致（`/usr/bin/python3`），否则 pgrep 判不出，每分鐘起一个新进程。
+4. 插件里 import client 依赖 `sys.path.insert(0, /home/ubuntu/fishbox)`，路径写死在 `FISHBOX_DIR` 环境变量兜底。
+5. AstrBot 命令触发只认 `/` 开头；「鱼箱列表」不带斜杠不会命中。
+6. 备份脚本 backup-data.sh 备份范围**不含** `/home/ubuntu/fishbox`，需要的话自己加进 tar 列表。
+
+---
+
+## 6. 常用命令
+
+    # 沙箱健康
+    cd /home/ubuntu/fishbox && python3 -c "import client;print(client.tools())"
+
+    # 单次执行（不经 server）
+    cd /home/ubuntu/fishbox && echo '{"code":"AAEC..."}' | python3 executor.py hearthstone_deck
+
+    # 看沙箱进程
+    ps -eo pid,etime,cmd | grep "server.py" | grep -v grep
+
+    # 重启 AstrBot 加载插件（需 sudo）
+    sudo systemctl restart astrbot

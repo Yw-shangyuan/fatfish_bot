@@ -3,17 +3,19 @@
 """肥鱼哨兵：定时体检，异常经 Server酱 推送到微信。
 
 检查项：
-  - napcat 容器在跑（docker ps）
+  - 协议容器在跑（snowluma 优先，napcat 回滚兜底，docker ps）
   - astrbot 服务 active（systemctl）
-  - QQ 登录态有效（本地 NapCat get_login_info，retcode==0；不产生任何QQ流量）
-  - NapCat<->AstrBot 反向 ws 链路（:6199 ESTAB 数 >= 1）
+  - QQ 登录态有效（本地 OneBot get_login_info，retcode==0；不产生任何QQ流量；
+    SnowLuma 需带 onebot.json 里的 Bearer token，脚本自动读取）
+  - SnowLuma<->AstrBot 反向 ws 链路（:6199 ESTAB 数 >= 1）
+  - 磁盘 IO 压力（/proc/pressure/io some avg10，阈值 50，防 MMKV 写爆云盘）
 
 行为：
   - 首检有异常 -> 等20秒全量复检，以复检结果为准（防重启窗口/瞬时抖动误报）
   - 状态 正常->异常：立即推送；持续异常每 2 小时重复提醒一次（带次数）
   - 状态 异常->正常：推送恢复通知（含离线时长）
   - 维护静音：touch /home/ubuntu/.config/fatfish-sentinel/mute 后只记状态不推送
-    （计划内重启 astrbot/napcat 前先 touch，完事删掉）
+    （计划内重启 astrbot/snowluma 或等待扫码前先 touch，完事删掉）
 
 用法:
   sentinel.py          # cron 例行体检
@@ -74,8 +76,10 @@ def push(key, title, desp):
 def checks():
     """执行全部体检。返回 {项目名: (是否健康, 详情文本)}。"""
     out = {}
-    nap_ok = "ok" in sh("docker ps --format '{{.Names}}' | grep -qx napcat && echo ok").stdout
-    out["napcat容器"] = (nap_ok, "" if nap_ok else "容器未运行")
+    CT = sh("docker ps --format '{{.Names}}' | grep -qx snowluma && echo snowluma "
+            "|| (docker ps --format '{{.Names}}' | grep -qx napcat && echo napcat)").stdout.strip()
+    nap_ok = CT in ("snowluma", "napcat")
+    out["协议容器"] = (nap_ok, "" if nap_ok else "snowluma/napcat 均未运行")
 
     r = sh("systemctl is-active astrbot")
     st = (r.stdout or "").strip()
@@ -83,18 +87,26 @@ def checks():
 
     # QQ 登录态：容器在跑才有意义，否则归因到容器项，避免重复报警
     if nap_ok:
+        tok = ""
+        try:  # SnowLuma 的 OneBot HTTP 带 Bearer token，随配置自动跟随
+            ob = json.load(open("/srv/snowluma/data/config/onebot.json"))
+            srv = (ob.get("networks", {}).get("httpServers") or [{}])[0]
+            tok = srv.get("accessToken", "") or ""
+        except Exception:
+            pass
+        auth = ("-H 'Authorization: Bearer %s' " % tok) if tok else ""
         r = sh("curl -s -m 8 -X POST http://127.0.0.1:3000/get_login_info "
-               "-H 'Content-Type: application/json' -d '{}'")
+               "-H 'Content-Type: application/json' " + auth + "-d '{}'")
         try:
             d = json.loads(r.stdout)
             ok = d.get("retcode") == 0
             det = "" if ok else "retcode=%s" % d.get("retcode")
             if not ok:
-                tail = sh("docker logs --since 30m napcat 2>&1 "
-                          "| grep -E 'KickedOffLine|下线通知|二维码已保存' | tail -2")
+                tail = sh("docker logs --since 30m %s 2>&1 "
+                          "| grep -iE 'kick|offline|qrcode|logout|下线|二维码' | tail -2" % CT)
                 det += "\n" + (tail.stdout or "").strip()[:300]
         except Exception:
-            ok, det = False, "NapCat 3000 接口无响应"
+            ok, det = False, "OneBot 3000 接口无响应"
         out["QQ登录态"] = (ok, det)
     else:
         out["QQ登录态"] = (True, "")  # 容器挂了时抑制本项，防止一次故障两条报警
@@ -105,6 +117,13 @@ def checks():
     except ValueError:
         n = 0
     out["ws链路6199"] = (n >= 1, "ESTAB=%d" % n)
+
+    try:  # IO 压力：MMKV 小写风暴的前兆指标，PSI 不支持的内核自动跳过
+        psi = open("/proc/pressure/io").read().splitlines()[0]
+        avg10 = float(psi.split()[1].split("=")[1])
+        out["IO压力"] = (avg10 < 50.0, "some avg10=%.1f（阈值50）" % avg10)
+    except Exception:
+        pass
     return out
 
 

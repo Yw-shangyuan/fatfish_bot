@@ -153,6 +153,54 @@ class ReplyMixin:
         fallback = len(compact) >= 8 or bool(re.search(r"[?？]|怎么|为什么|觉得|喜欢|推荐|请问", str(content)))
         return fallback, "deterministic_interest_fallback"
 
+    async def _owner_group_value(self, content, gid, willing, who="主人"):
+        """群聊消息价值评分：LLM 输出 0-100 分，超过 100-willing 才回。
+
+        上下文取自 on_qq_context_capture 维护的滚动缓冲（跳过当前消息）：
+        条数 = max(默认3, 5秒内条数)，总和不超过 QQ_GROUP_OWNER_CTX 上限。
+        评分失败时 fail-open，宁可多答不可漏答。主人和群友共用本函数，
+        由 who 区分说话人身份。
+
+        Args:
+            content: 最新消息文本（群友被@时带@标注）。
+            gid: 群号，用于取该群上下文缓冲。
+            willing: 回复意愿值 0-100。
+            who: 说话人身份，"主人" 或 "群友"。
+
+        Returns:
+            tuple[bool, str]: (是否回复, 不超过80字的短理由)。
+        """
+        buf = getattr(self, "_qq_ctx_buf", None) or {}
+        entries = list(buf.get(gid) or [])[:-1]
+        now = time.time()
+        in5 = sum(1 for e in entries if now - e[0] <= 5.0)
+        cap = max(0, min(10, int(self.config.get("QQ_GROUP_OWNER_CTX", 5) or 0)))
+        n = min(max(3, in5), cap, len(entries))
+        ctx = "\n".join(f"{name}: {text[:80]}" for _, name, text in entries[-n:]) if n else "（无）"
+        threshold = 100 - int(willing)
+        prompt = f"""你是"蓝色大肥鱼"本人。{"主人" if who == "主人" else "群里的朋友"}刚在群里说话，判断这条值不值得你开口接。
+只输出严格 JSON：{{"score":整数,"reason":"不超过30字"}}。
+评分锚点：
+- 点名或@肥鱼、直接向肥鱼提问或下指令 → 80-100
+- 有实质内容、能接话或值得分享观点 → 50-79
+- 普通闲聊、顺着前文的追问 → 30-49
+- 复读刷屏、无信息量、回不回都行 → 0-29
+群里前几条消息（旧→新）：
+{ctx}
+最新消息：{str(content)[:800]}"""
+        try:
+            raw = str(await self._llm_call(prompt, max_tokens=160) or "").strip()
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S)
+            match = re.search(r"\{.*\}", raw, re.S)
+            data = json.loads(match.group(0) if match else raw)
+            score = int(data.get("score"))
+            if not 0 <= score <= 100:
+                raise ValueError(f"score越界: {score}")
+            return score > threshold, f"{score}分：{data.get('reason') or ''}"[:80]
+        except Exception as exc:
+            logger.debug(f"[BiliBot] 群主人价值评分失败，fail-open：{exc}")
+            return True, "owner_group_gate_fail_open"
+
     def _comment_runtime_event(self, item):
         """把评论/@通知转换为统一事件，并计算跨入口优先级。"""
 

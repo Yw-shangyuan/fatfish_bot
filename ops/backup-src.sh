@@ -7,6 +7,7 @@ rsync -a --delete --exclude .git --exclude __pycache__ --exclude "*.pyc" "$SRC/"
 for f in /home/ubuntu/deploy.sh /home/ubuntu/grab.py /home/ubuntu/ops/sentinel.py /home/ubuntu/ops/qr_portal.py /home/ubuntu/backup-data.sh /home/ubuntu/backup-src.sh; do [ -f "$f" ] && cp -f "$f" "$DST/ops/" || true; done
 cp -f /etc/systemd/system/fatfish-qr.service "$DST/ops/" 2>/dev/null || true
 cp -f /etc/systemd/system/astrbot.service "$DST/ops/" 2>/dev/null || true
+rsync -a --delete --exclude .git /home/ubuntu/ops/docs/ "$DST/ops/docs/"
 cd "$DST"
 git add -A
 if git diff --cached --quiet; then echo "no changes, nothing to push"; exit 0; fi

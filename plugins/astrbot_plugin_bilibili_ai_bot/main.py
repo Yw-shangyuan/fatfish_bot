@@ -37,6 +37,33 @@ QQ_SEND_QUEUE_LIMIT = 120.0
 # the original sender timestamp in raw_message. Drop anything older than this to
 # avoid echoing hours-old chats and to save tokens.
 QQ_STALE_MAX_AGE_SEC = 1800
+# Owner group gate: rapid-fire owner messages in a group are scored only once;
+# later messages inside this window ride the first verdict with zero LLM cost.
+OWNER_GATE_DEDUP_SEC = 5.0
+
+# ---- Mute gates: qq_mute drops every QQ message before any AI call; bili_mute
+# pauses every scheduled Bilibili action (watch/comment/DM/dynamic). Each file
+# holds an epoch deadline; absent or expired means the gate is open (fail-open).
+MUTE_DIR = os.path.join(os.path.expanduser("~"), ".config", "fatfish-sentinel")
+QQ_MUTE_FILE = os.path.join(MUTE_DIR, "qq_mute")
+BILI_MUTE_FILE = os.path.join(MUTE_DIR, "bili_mute")
+
+# ---- QQ 群级覆盖与私聊联系人（均存插件 data/ 目录，_save_json 原子写）----
+# group_prefs.json：{群号: {"need_at": bool, "willing": int, "mute": bool}}，
+#   缺项回落全局同名配置；由 /qq群* 命令维护。
+# contacts.json：{QQ号: {"note": str}}，私聊闸门白名单，仅影响私聊。
+GROUP_PREFS_FILE = os.path.join(DATA_DIR, "group_prefs.json")
+CONTACTS_FILE = os.path.join(DATA_DIR, "contacts.json")
+
+
+def _read_mute(path: str) -> float | None:
+    """Return the mute deadline epoch when the gate is armed, else None."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            until = float(f.readline().strip())
+    except (OSError, ValueError):
+        return None
+    return until if until > time.time() else None
 
 
 def install_qq_send_throttle() -> bool:
@@ -60,6 +87,9 @@ def install_qq_send_throttle() -> bool:
 
     async def paced(cls, *args, **kwargs):
         enqueued = time.monotonic()
+        if _read_mute(QQ_MUTE_FILE):
+            logger.warning("[BiliBot] QQ mute gate armed, outgoing message dropped")
+            return
         async with lock:
             queued = time.monotonic() - enqueued
             if queued > QQ_SEND_QUEUE_LIMIT:
@@ -329,6 +359,16 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         logger.info("[BiliBot] 主循环开始")
         while self._running:
             try:
+                bili_until = _read_mute(BILI_MUTE_FILE)
+                if bili_until is not None:
+                    if time.time() - getattr(self, "_bili_mute_logged_at", 0.0) > 600:
+                        self._bili_mute_logged_at = time.time()
+                        logger.info(
+                            "[BiliBot] bili mute armed, scheduling paused "
+                            f"({int(bili_until - time.time())}s remaining)"
+                        )
+                    await asyncio.sleep(60)
+                    continue
                 await self._maybe_evolve_personality()
                 await self._ensure_autonomous_daily_plan()
                 h = datetime.now().hour
@@ -518,6 +558,19 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             _ACTIVE_BILIBOT = None
         self._cleanup_temp_files()
         logger.info("[BiliBot] 已停用")
+
+    # ===== Mute gate: hard-stop every QQ message while qq_mute is armed =====
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=9999)
+    async def on_qq_mute_gate(self, event: AstrMessageEvent):
+        """Stop the whole pipeline (and thus any LLM/token usage) while muted."""
+        until = _read_mute(QQ_MUTE_FILE)
+        if until is not None:
+            event.stop_event()
+            logger.info(
+                f"[BiliBot] QQ mute gate dropped a message "
+                f"({int(until - time.time())}s remaining)"
+            )
+
     # ===== QQ命令 =====
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=850)
     async def on_group_bili_share(self, event: AstrMessageEvent):
@@ -942,6 +995,36 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         接不住时 stop_event 保持静默，避免肥鱼没听懂还硬回一句“我没看懂”；
         命令、空文本、未唤醒机器人的群消息不判定；判定失败时放行（宁可多答不漏答）。
         """
+        # 群友群消息意愿闸门：独立于主人闸门与模式约束，只受
+        # QQ_GROUP_GUEST_WILLING 控制（100=必回=维持现状）。评分复用主人链路，
+        # 去重键带 |g 后缀与主人判定分开计数，互不搭车。
+        try:
+            _g_gid = str(event.get_group_id() or "")
+            _g_admin = event.is_admin()
+        except Exception:
+            return
+        if _g_gid and not _g_admin:
+            guest_w = int(self._qq_group_pref(_g_gid, "willing", int(self.config.get("QQ_GROUP_GUEST_WILLING", 100) or 0)))
+            if guest_w >= 100:
+                return
+            g_text = str(event.message_str or "").strip()
+            if not g_text or g_text.startswith("/") or len(g_text) > 800:
+                return
+            if event.is_at_or_wake_command:
+                g_text += "\n（注：这条消息@了肥鱼）"
+            g_now = time.time()
+            g_last = getattr(self, "_owner_gate_last", None)
+            if g_last is None:
+                g_last = self._owner_gate_last = {}
+            g_hit = g_last.get(_g_gid + "|g")
+            if g_hit and g_now - g_hit[0] < OWNER_GATE_DEDUP_SEC:
+                return
+            ok, reason = await self._owner_group_value(g_text, _g_gid, guest_w, who="群友")
+            g_last[_g_gid + "|g"] = (g_now, ok)
+            if not ok:
+                event.stop_event()
+                logger.info(f"[BiliBot] 群友意愿闸门静默：{str(reason)[:60]}")
+            return
         if not self.config.get("OWNER_WORTHY_GATE", True):
             return
         if not self._mode_owner_gate_enabled():
@@ -956,12 +1039,67 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         text = str(event.message_str or "").strip()
         if not text or text.startswith("/") or len(text) > 800:
             return
+        try:
+            gid = str(event.get_group_id() or "")
+        except Exception:
+            gid = ""
+        if gid:
+            # 群聊主人消息：意愿值统治，与私聊闸门互不干扰。100=必回零成本；
+            # <100 走价值评分，判过的消息在 OWNER_GATE_DEDUP_SEC 窗口内的后续
+            # 连发直接搭车放行，不重复调 LLM。
+            willing = int(self.config.get("QQ_GROUP_OWNER_WILLING", 100) or 0)
+            if willing >= 100:
+                return
+            now = time.time()
+            last = getattr(self, "_owner_gate_last", None)
+            if last is None:
+                last = self._owner_gate_last = {}
+            hit = last.get(gid)
+            if hit and now - hit[0] < OWNER_GATE_DEDUP_SEC:
+                return
+            ok, reason = await self._owner_group_value(text, gid, willing)
+            last[gid] = (now, ok)
+            if not ok:
+                event.stop_event()
+                logger.info(f"[BiliBot] 群主人意愿闸门静默：{str(reason)[:60]}")
+            return
         if not event.is_at_or_wake_command:
             return
         ok, reason = await self._should_reply_by_interest(text, "主人", channel="owner")
         if not ok:
             event.stop_event()
             logger.info(f"[BiliBot] 主人消息闸门静默：{str(reason)[:60]}")
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=70)
+    async def on_qq_context_capture(self, event: AstrMessageEvent):
+        """群消息上下文记录器：把群聊文本落入滚动缓冲，供主人意愿评分组装上下文。
+
+        priority=70 先于安全闸门(65)与主人 worthy 闸门(60)运行；缓冲含当前
+        消息本身（评分端会跳过末条）；只记录，从不拦截。"""
+        try:
+            if event.get_platform_name() == "webchat":
+                return
+            gid = str(event.get_group_id() or "")
+        except Exception:
+            return
+        if not gid:
+            return
+        text = str(event.message_str or "").strip()
+        if not text:
+            return
+        name = "群友"
+        try:
+            sender = getattr(event.message_obj, "sender", None)
+            if isinstance(sender, dict):
+                name = str(sender.get("card") or sender.get("nickname") or name)[:20]
+        except Exception:
+            pass
+        buf = getattr(self, "_qq_ctx_buf", None)
+        if buf is None:
+            buf = self._qq_ctx_buf = {}
+        entry = (time.time(), name, text[:120])
+        seq = buf.get(gid)
+        buf[gid] = (seq + [entry])[-10:] if seq else [entry]
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("qq模式")
@@ -1015,6 +1153,46 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             pass
         return False
 
+    def _qq_group_pref(self, gid, key, default):
+        """群级生效值：group_prefs.json 有覆盖用覆盖，没有回落全局默认值。"""
+        try:
+            ent = (self._load_json(GROUP_PREFS_FILE, {}) or {}).get(str(gid)) or {}
+            v = ent.get(key)
+            return default if v is None else v
+        except Exception:
+            return default
+
+    def _qq_group_pref_set(self, gid, key, value):
+        """写群级覆盖；value=None 删该键，条目空了删整群。"""
+        prefs = dict(self._load_json(GROUP_PREFS_FILE, {}) or {})
+        ent = dict(prefs.get(str(gid)) or {})
+        if value is None:
+            ent.pop(key, None)
+        else:
+            ent[key] = value
+        if ent:
+            prefs[str(gid)] = ent
+        else:
+            prefs.pop(str(gid), None)
+        self._save_json(GROUP_PREFS_FILE, prefs)
+
+    def _qq_target_gid(self, event, toks):
+        """解析群命令的目标群号：参数尾部 4 位以上纯数字=指定群号，否则当前群。
+
+        Returns:
+            tuple[str, list]: (群号, 去掉群号后的剩余参数)；不在群里且未指定时群号为空串。
+        """
+        rest = list(toks)
+        gid = ""
+        if rest and str(rest[-1]).isdigit() and len(str(rest[-1])) >= 4:
+            gid = str(rest.pop())
+        if not gid:
+            try:
+                gid = str(event.get_group_id() or "")
+            except Exception:
+                gid = ""
+        return gid, rest
+
     @filter.event_message_type(filter.EventMessageType.ALL, priority=65)
     async def on_qq_safety_gate(self, event: AstrMessageEvent):
         """QQ 侧风控安全闸门：静默时段(仅群聊) -> 要@(仅群聊) -> 发送限流。
@@ -1049,13 +1227,36 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         except Exception:
             pass
         if is_group:
-            if self.config.get("QQ_GROUP_MUTE", False):
-                event.stop_event()
-                return
+            gid = str(event.get_group_id() or "")
+            if bool(self._qq_group_pref(gid, "mute", self.config.get("QQ_GROUP_MUTE", False))):
+                # 静音群例外：仅主人 @ 肥鱼的消息豁免；主人正常发言与所有群友一样装死。
+                try:
+                    exempt = bool(event.is_admin()) and event.is_at_or_wake_command
+                except Exception:
+                    exempt = False
+                if not exempt:
+                    event.stop_event()
+                    return
             if self._qq_quiet_window()[0]:
                 event.stop_event()
                 return
-            if self.config.get("QQ_NEED_AT", False) and not event.is_at_or_wake_command:
+            if bool(self._qq_group_pref(gid, "need_at", self.config.get("QQ_NEED_AT", False))) and not event.is_at_or_wake_command:
+                event.stop_event()
+                return
+        elif bool(self.config.get("QQ_PRIVATE_CONTACT_GATE", False)):
+            # 私聊闸门：开启后仅管理员（主人）与 contacts 名单内的 QQ 号可被回复。
+            try:
+                allowed = bool(event.is_admin())
+            except Exception:
+                allowed = False
+            if not allowed:
+                try:
+                    uid = str(event.get_sender_id() or "")
+                except Exception:
+                    uid = ""
+                allowed = bool(uid) and uid in (self._load_json(CONTACTS_FILE, {}) or {})
+            if not allowed:
+                logger.info("[BiliBot] 私聊闸门静默（非主人且不在联系人名单）")
                 event.stop_event()
                 return
         per_min = int(self.config.get("QQ_RATE_PER_MIN", 0) or 0)
@@ -1090,6 +1291,11 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             f"限流：{'关' if per_min <= 0 else f'每分钟最多 {per_min} 条，超限冷却 {cooldown} 秒'}（改法：/qq限流 2 180 或 /qq限流 0 0）",
             f"群聊要@：{'✅ 开（没@肥鱼一律不理，含主人）' if self.config.get('QQ_NEED_AT', False) else '关'}（改法：/qq要@ 开/关）",
             f"群聊回复：{'🔇 全禁（群里说什么都不理）' if self.config.get('QQ_GROUP_MUTE', False) else '🔊 正常'}（改法：/qq群聊 开/关）",
+            f"群聊主人意愿：{int(self.config.get('QQ_GROUP_OWNER_WILLING', 100) or 0)}/100（100=必回，低于100按消息价值评分，判定自带上下文、同群5秒只判一次；改法：/qq意愿 80）",
+            f"群聊群友意愿：{int(self.config.get('QQ_GROUP_GUEST_WILLING', 100) or 0)}/100（100=都回，低于100低价值群友闲聊装死且零花费；改法：/qq群友意愿 60）",
+            f"群判定上下文：上限 {int(self.config.get('QQ_GROUP_OWNER_CTX', 5) or 0)} 条（默认带最近3条，5秒内连发的会全部压进上下文；改法：/qq上下文 5）",
+            f"群级覆盖：{len(self._load_json(GROUP_PREFS_FILE, {}) or {})} 个群有专属设置（/qq群 列表；单群：/qq群@ /qq群静音 /qq群意愿）",
+            f"私聊闸门：{'✅ 开（仅主人与联系人可被回复）' if self.config.get('QQ_PRIVATE_CONTACT_GATE', False) else '关'}（联系人 {len(self._load_json(CONTACTS_FILE, {}) or {})} 人；改法：/qq私信闸 开/关，名单：/qq联系人）",
             f"当前 QQ 模式：{self.config.get('QQ_MODE', 'normal')}（改法：/qq模式）",
             "注：静默与要@只限制群聊，私聊永远理主人；/ 开头命令永远放行。",
         ]
@@ -1143,6 +1349,56 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         self.config.save_config()
         mood = "进入高冷模式，装死本鲸专业得很" if v <= 30 else ("放开手脚，有话就接" if v >= 70 else "中庸之道，咕噜")
         yield event.plain_result(f"✅ 活跃值已设为 {v}/100：{mood}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq意愿")
+    async def cmd_qq_willing(self, event: AstrMessageEvent):
+        toks = event.message_str.strip().split(maxsplit=1)
+        cur = int(self.config.get("QQ_GROUP_OWNER_WILLING", 100) or 0)
+        if len(toks) < 2 or not toks[1].strip().isdigit():
+            yield event.plain_result(
+                f"当前群聊主人意愿值：{cur}/100（100=必回；低于100只回价值分>{100 - cur}的群消息）\n"
+                "用法：/qq意愿 80（评分自动带群上下文，同群5秒内只判一次；私聊不受影响）"
+            )
+            return
+        v = max(0, min(100, int(toks[1].strip())))
+        self.config["QQ_GROUP_OWNER_WILLING"] = v
+        self.config.save_config()
+        mood = "群里句句必回主人" if v >= 100 else ("按消息价值挑着回" if v > 0 else "群里对主人装死（命令除外）")
+        yield event.plain_result(f"✅ 群聊主人意愿值已设为 {v}/100（回话门槛：价值分>{100 - v}）：{mood}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq群友意愿")
+    async def cmd_qq_guest_willing(self, event: AstrMessageEvent):
+        toks = event.message_str.strip().split(maxsplit=1)
+        cur = int(self.config.get("QQ_GROUP_GUEST_WILLING", 100) or 0)
+        if len(toks) < 2 or not toks[1].strip().isdigit():
+            yield event.plain_result(
+                f"当前群聊群友意愿值：{cur}/100（100=群友消息都回；低于100只回价值分>{100 - cur}的，被@必高分）\n"
+                "用法：/qq群友意愿 60（评分自动带群上下文，同群友消息5秒内只判一次；主人消息不受此值影响）"
+            )
+            return
+        v = max(0, min(100, int(toks[1].strip())))
+        self.config["QQ_GROUP_GUEST_WILLING"] = v
+        self.config.save_config()
+        mood = "群友说啥都接" if v >= 100 else ("挑有价值的接，闲聊装死" if v > 0 else "群里对群友彻底装死（@也没用）")
+        yield event.plain_result(f"✅ 群聊群友意愿值已设为 {v}/100（回话门槛：价值分>{100 - v}）：{mood}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq上下文")
+    async def cmd_qq_ctx(self, event: AstrMessageEvent):
+        toks = event.message_str.strip().split(maxsplit=1)
+        cur = int(self.config.get("QQ_GROUP_OWNER_CTX", 5) or 0)
+        if len(toks) < 2 or not toks[1].strip().isdigit():
+            yield event.plain_result(
+                f"当前群判定上下文上限：{cur} 条（默认带最近3条，5秒内连发的会全部压进上下文，总和不超本上限）\n"
+                "用法：/qq上下文 5（0=不带上下文）"
+            )
+            return
+        v = max(0, min(10, int(toks[1].strip())))
+        self.config["QQ_GROUP_OWNER_CTX"] = v
+        self.config.save_config()
+        yield event.plain_result(f"✅ 群判定上下文上限已设为 {v} 条")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("qq限流")
@@ -1207,6 +1463,207 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         self.config["QQ_GROUP_MUTE"] = mute
         self.config.save_config()
         yield event.plain_result("🔇 群聊全禁已开启：群里说什么本鱼都装死，私聊和命令不受影响" if mute else "🔊 群聊回复已恢复：按要@和静默时段规则正常接话")
+
+    # ===== 群级覆盖与私聊联系人：/qq群 系列 + /qq联系人 + /qq私信闸 =====
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq群")
+    async def cmd_qq_group_show(self, event: AstrMessageEvent):
+        """查看群级配置：/qq群 看本群生效值；/qq群 列表 总览全部覆盖。"""
+        toks = event.message_str.strip().split()
+        if len(toks) >= 2 and toks[1] == "列表":
+            prefs = self._load_json(GROUP_PREFS_FILE, {}) or {}
+            if not prefs:
+                yield event.plain_result("📋 群级覆盖：（空）所有群都走全局配置\n改法：群里发 /qq群@ 、/qq群静音 、/qq群意愿 ，均支持「默认」撤销")
+                return
+            lines = [f"📋 群级覆盖（{len(prefs)} 个群）："]
+            for gid, ent in prefs.items():
+                rows = []
+                if "need_at" in ent:
+                    rows.append("要@=" + ("开" if ent["need_at"] else "关"))
+                if "willing" in ent:
+                    rows.append(f"意愿={ent['willing']}")
+                if "mute" in ent:
+                    rows.append("静音=" + ("开" if ent["mute"] else "关"))
+                lines.append(f"  {gid}：{'、'.join(rows) or '（空条目）'}")
+            lines.append("整群清空：/qq群忘记 <群号>")
+            yield event.plain_result("\n".join(lines))
+            return
+        try:
+            gid = str(event.get_group_id() or "")
+        except Exception:
+            gid = ""
+        if not gid:
+            yield event.plain_result("本命令需在群内使用（或 /qq群 列表 总览）；要配置别的群，在命令尾部加群号")
+            return
+        ent = (self._load_json(GROUP_PREFS_FILE, {}) or {}).get(gid) or {}
+        na_eff = bool(self._qq_group_pref(gid, "need_at", self.config.get("QQ_NEED_AT", False)))
+        mute_eff = bool(self._qq_group_pref(gid, "mute", self.config.get("QQ_GROUP_MUTE", False)))
+        w_eff = int(self._qq_group_pref(gid, "willing", int(self.config.get("QQ_GROUP_GUEST_WILLING", 100) or 0)))
+        src = "有专属覆盖" if ent else "跟随全局配置"
+        yield event.plain_result(
+            f"🏠 群 {gid} 生效配置（{src}）：\n"
+            f"  要@：{'开（没@不理）' if na_eff else '关（免@也回）'}\n"
+            f"  静音：{'开（仅主人@豁免）' if mute_eff else '关'}\n"
+            f"  群友意愿：{w_eff}/100（100=免检直回）\n"
+            "改法：/qq群@ 开|关|默认 · /qq群静音 开|关|默认 · /qq群意愿 0-100|默认 · /qq群忘记"
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq群@")
+    async def cmd_qq_group_needat(self, event: AstrMessageEvent):
+        """单群要@开关：/qq群@ 开|关|默认 [群号]。"""
+        toks = event.message_str.strip().split()[1:]
+        gid, rest = self._qq_target_gid(event, toks)
+        if not gid:
+            yield event.plain_result("本命令需在群内使用，或在尾部指定群号：/qq群@ 开 123456")
+            return
+        arg = rest[0].strip() if rest else ""
+        if arg in {"开", "开启", "on", "1"}:
+            self._qq_group_pref_set(gid, "need_at", True)
+            yield event.plain_result(f"✅ 群 {gid}：必须@肥鱼才接话（覆盖全局）")
+        elif arg in {"关", "关闭", "off", "0"}:
+            self._qq_group_pref_set(gid, "need_at", False)
+            yield event.plain_result(f"✅ 群 {gid}：不用@也正常接话（覆盖全局）")
+        elif arg in {"默认", "default"}:
+            self._qq_group_pref_set(gid, "need_at", None)
+            yield event.plain_result(f"✅ 群 {gid}：要@恢复跟随全局（当前全局={'开' if self.config.get('QQ_NEED_AT', False) else '关'}）")
+        else:
+            cur = bool(self._qq_group_pref(gid, "need_at", self.config.get("QQ_NEED_AT", False)))
+            yield event.plain_result(
+                f"群 {gid} 当前要@：{'开' if cur else '关'}\n用法：/qq群@ 开（必须@才回）| 关（免@也回）| 默认（撤销覆盖）[群号]"
+            )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq群静音")
+    async def cmd_qq_group_localmute(self, event: AstrMessageEvent):
+        """单群静音：/qq群静音 开|关|默认 [群号]。开=群里一律装死，仅主人@豁免。"""
+        toks = event.message_str.strip().split()[1:]
+        gid, rest = self._qq_target_gid(event, toks)
+        if not gid:
+            yield event.plain_result("本命令需在群内使用，或在尾部指定群号：/qq群静音 开 123456")
+            return
+        arg = rest[0].strip() if rest else ""
+        if arg in {"开", "开启", "on", "1", "禁"}:
+            self._qq_group_pref_set(gid, "mute", True)
+            yield event.plain_result(f"🔇 群 {gid} 已静音：群里说什么都不理，只有主人@肥鱼会回（命令不受影响）")
+        elif arg in {"关", "关闭", "off", "0"}:
+            self._qq_group_pref_set(gid, "mute", False)
+            yield event.plain_result(f"🔊 群 {gid} 静音关闭（可单独豁免全局全禁；全局没开时此设置无感）")
+        elif arg in {"默认", "default"}:
+            self._qq_group_pref_set(gid, "mute", None)
+            yield event.plain_result(f"✅ 群 {gid}：静音恢复跟随全局（当前全局={'🔇全禁' if self.config.get('QQ_GROUP_MUTE', False) else '🔊正常'}）")
+        else:
+            cur = bool(self._qq_group_pref(gid, "mute", self.config.get("QQ_GROUP_MUTE", False)))
+            yield event.plain_result(
+                f"群 {gid} 当前静音：{'开' if cur else '关'}\n用法：/qq群静音 开（该群装死，主人@除外）| 关 | 默认 [群号]"
+            )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq群意愿")
+    async def cmd_qq_group_willing(self, event: AstrMessageEvent):
+        """单群群友意愿：/qq群意愿 0-100|默认 [群号]。100=群友免检直回。"""
+        toks = event.message_str.strip().split()[1:]
+        gid, rest = self._qq_target_gid(event, toks)
+        if not gid:
+            yield event.plain_result("本命令需在群内使用，或在尾部指定群号：/qq群意愿 80 123456")
+            return
+        arg = rest[0].strip() if rest else ""
+        if arg in {"默认", "default"}:
+            self._qq_group_pref_set(gid, "willing", None)
+            yield event.plain_result(f"✅ 群 {gid}：群友意愿恢复跟随全局（当前全局={int(self.config.get('QQ_GROUP_GUEST_WILLING', 100) or 0)}/100）")
+        elif arg.isdigit() and 0 <= int(arg) <= 100:
+            self._qq_group_pref_set(gid, "willing", int(arg))
+            note = "（100=免检直回）" if int(arg) >= 100 else ""
+            yield event.plain_result(f"✅ 群 {gid}：群友意愿覆盖为 {arg}/100{note}")
+        else:
+            cur = int(self._qq_group_pref(gid, "willing", int(self.config.get("QQ_GROUP_GUEST_WILLING", 100) or 0)))
+            yield event.plain_result(
+                f"群 {gid} 当前群友意愿：{cur}/100\n用法：/qq群意愿 0-100（100=免检直回，0=低价值闲聊全装死）| 默认 [群号]"
+            )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq群忘记")
+    async def cmd_qq_group_forget(self, event: AstrMessageEvent):
+        """清空单群全部覆盖：/qq群忘记 [群号]。"""
+        toks = event.message_str.strip().split()[1:]
+        gid, _ = self._qq_target_gid(event, toks)
+        if not gid:
+            yield event.plain_result("本命令需在群内使用，或在尾部指定群号：/qq群忘记 123456")
+            return
+        prefs = dict(self._load_json(GROUP_PREFS_FILE, {}) or {})
+        if gid in prefs:
+            prefs.pop(gid)
+            self._save_json(GROUP_PREFS_FILE, prefs)
+            yield event.plain_result(f"✅ 群 {gid} 的专属配置已清空，恢复跟随全局")
+        else:
+            yield event.plain_result(f"群 {gid} 本来就没有专属配置")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq联系人")
+    async def cmd_qq_contacts(self, event: AstrMessageEvent):
+        """私聊联系人名单：/qq联系人 查看 · +QQ号 [备注] 添加 · -QQ号 删除。"""
+        toks = event.message_str.strip().split()
+        contacts = dict(self._load_json(CONTACTS_FILE, {}) or {})
+        if len(toks) < 2:
+            gate = bool(self.config.get("QQ_PRIVATE_CONTACT_GATE", False))
+            lines = [f"📒 联系人（{len(contacts)} 人）· 私聊闸门：{'✅ 开' if gate else '关'}"]
+            for uid, ent in contacts.items():
+                note = str((ent or {}).get("note", "") or "")
+                lines.append(f"  {uid}" + (f"　{note}" if note else ""))
+            if not contacts:
+                lines.append("  （空）加人：/qq联系人 +QQ号 [备注]")
+            lines.append("注：主人（管理员）天然可回不用添加；名单只影响私聊，群内行为不变。")
+            yield event.plain_result("\n".join(lines))
+            return
+        arg = toks[1].strip()
+        if arg.startswith("+"):
+            uid = arg[1:].strip()
+            if not uid.isdigit():
+                yield event.plain_result("QQ号得是数字：/qq联系人 +123456 [备注]")
+                return
+            note = " ".join(toks[2:])[:30] if len(toks) > 2 else ""
+            contacts[uid] = {"note": note}
+            self._save_json(CONTACTS_FILE, contacts)
+            yield event.plain_result(f"✅ 已把 {uid} 记为认识的人" + (f"（{note}）" if note else ""))
+            return
+        if arg.startswith("-"):
+            uid = arg[1:].strip()
+            if uid in contacts:
+                contacts.pop(uid)
+                self._save_json(CONTACTS_FILE, contacts)
+                yield event.plain_result(f"✅ 已移除联系人 {uid}，其私聊恢复陌生人待遇")
+            else:
+                yield event.plain_result(f"{uid} 不在联系人名单里")
+            return
+        yield event.plain_result("用法：/qq联系人 查看名单 · /qq联系人 +QQ号 [备注] · /qq联系人 -QQ号")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq私信闸")
+    async def cmd_qq_private_gate(self, event: AstrMessageEvent):
+        """陌生人私聊闸门：/qq私信闸 开|关。开=仅主人与联系人名单的私聊会被回复。"""
+        toks = event.message_str.strip().split()
+        cur = bool(self.config.get("QQ_PRIVATE_CONTACT_GATE", False))
+        if len(toks) < 2:
+            n = len(self._load_json(CONTACTS_FILE, {}) or {})
+            yield event.plain_result(
+                f"私聊闸门：{'✅ 开' if cur else '关'}（联系人 {n} 人）\n"
+                "开=仅主人与联系人名单的私聊会被回复，其余静默；用法：/qq私信闸 开|关"
+            )
+            return
+        arg = toks[1].strip()
+        if arg in {"开", "开启", "on", "1"}:
+            if not (self._load_json(CONTACTS_FILE, {}) or {}):
+                yield event.plain_result("⚠️ 联系人名单还是空的：现在开启的话，除主人外所有私聊都会静默。先 /qq联系人 +QQ号 加人，再来开闸")
+                return
+            self.config["QQ_PRIVATE_CONTACT_GATE"] = True
+            self.config.save_config()
+            yield event.plain_result("✅ 私聊闸门已开启：陌生人私聊装死，主人与联系人不受影响")
+        elif arg in {"关", "关闭", "off", "0"}:
+            self.config["QQ_PRIVATE_CONTACT_GATE"] = False
+            self.config.save_config()
+            yield event.plain_result("✅ 私聊闸门已关闭：所有私聊恢复全员回复")
+        else:
+            yield event.plain_result("用法：/qq私信闸 开|关")
 
     # ===== QQ 只读查看器：人格 / 知识库（ADMIN + 仅私聊 + 白名单三道门） =====
     def _qq_view_ro(self, path, sql, args=()):
@@ -2067,7 +2524,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili帮助")
     async def cmd_help(self, event: AstrMessageEvent):
-        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili直播 — 进入指定直播间参与弹幕互动\n/bili计划 — 查看今日主动/动态/看番时间\n/bili分区 — 查看视频池中文填法和分区名\n/bili启动 — 启动\n/bili停止 — 停止\n/bili主动 — 立刻触发一次主动看视频\n/bili解析 [链接/BV号] — 解析指定、引用或上一个视频\n/bili开关 — 功能开关\n/bili模式 — 切换B站评论人设(温和/毒舌)\n/qq模式 — 切换QQ聊天人格(常规/简单/贴吧)\n/qq设置 — 查看QQ风控配置\n/qq静默 — 设置静默时段(如23:30-08:00/关)\n/qq活跃 — 回复活跃值0~100\n/qq限流 — 每分钟放行条数+冷却\n/qq要@ — 群聊必须@才回(开/关)\n/qq人格 — 查看AstrBot人格(限白名单)\n/qq知识库 — 查看知识库文档(限白名单)\n/qq白名单 — 管理可查看条目\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili拉黑 — 手动拉黑\n/bili解黑 — 解除拉黑\n/bili黑名单 — 查看黑名单\n/bili兴趣 — 查看近期视频口味与已沉淀偏好\n/bili性格 — 查看性格演化\n/bili性格编辑 — 手动编辑性格\n/bili性格删除 — 删除演化条目\n/bili日志 视频 — 主动看视频&评论记录\n/bili日志 番剧 — 看番记录\n/bili日志 动态 — 动态发布记录\n/bili日志 回复 — 评论回复记录\n/bili开关 解析 — 视频解析总开关\n/bili开关 自动解析 — 聊天链接自动解析开关\n/bili开关 手动解析 — /bili解析 命令开关\n/bili开关 LLM解析 — bili_parse_video 工具开关\n/bili开关 解析视频 — 是否发送原视频切片\n/bili开关 筛选 — 主动看视频前标题筛选\n/bili开关 直播回复 — 直播间弹幕互动开关\n/bili联动 — 查看直播伴侣联动状态\n/bili看番 — 手动触发看番\n/bili番剧记忆 — 查看追番进度\n/bili永久记忆 — 查看/删除永久记忆\n/bili动态 — 手动发动态\n/bili绑定 — 绑定QQ与B站UID\n/bili解绑 — 解除绑定\n/bili清理 — 清理临时文件\n/bili帮助 — 本帮助\n/biliUMO — 获取当前UMO并自动填入配置\n━━━━━━━━━━━━\n💡 首次用 /bili登录\n💡 视频池配置不会背编号时，用 /bili分区 查中文填法")
+        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili直播 — 进入指定直播间参与弹幕互动\n/bili计划 — 查看今日主动/动态/看番时间\n/bili分区 — 查看视频池中文填法和分区名\n/bili启动 — 启动\n/bili停止 — 停止\n/bili主动 — 立刻触发一次主动看视频\n/bili解析 [链接/BV号] — 解析指定、引用或上一个视频\n/bili开关 — 功能开关\n/bili模式 — 切换B站评论人设(温和/毒舌)\n/qq模式 — 切换QQ聊天人格(常规/简单/贴吧)\n/qq设置 — 查看QQ风控配置\n/qq意愿 — 群聊主人回复意愿\n/qq群友意愿 — 群聊群友回复意愿\n/qq上下文 — 评分上下文条数\n/qq静默 — 设置静默时段(如23:30-08:00/关)\n/qq活跃 — 回复活跃值0~100\n/qq限流 — 每分钟放行条数+冷却\n/qq要@ — 群聊必须@才回(开/关)\n/qq群 — 本群生效配置(/qq群 列表 总览)\n/qq群@ — 单群要@覆盖(开/关/默认)\n/qq群静音 — 单群静音(仅主人@豁免)\n/qq群意愿 — 单群群友意愿覆盖(0-100)\n/qq群忘记 — 清空某群全部覆盖\n/qq联系人 — 私聊联系人名单(+/−QQ号)\n/qq私信闸 — 陌生人私聊拦截(开/关)\n/qq人格 — 查看AstrBot人格(限白名单)\n/qq知识库 — 查看知识库文档(限白名单)\n/qq白名单 — 管理可查看条目\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili拉黑 — 手动拉黑\n/bili解黑 — 解除拉黑\n/bili黑名单 — 查看黑名单\n/bili兴趣 — 查看近期视频口味与已沉淀偏好\n/bili性格 — 查看性格演化\n/bili性格编辑 — 手动编辑性格\n/bili性格删除 — 删除演化条目\n/bili日志 视频 — 主动看视频&评论记录\n/bili日志 番剧 — 看番记录\n/bili日志 动态 — 动态发布记录\n/bili日志 回复 — 评论回复记录\n/bili开关 解析 — 视频解析总开关\n/bili开关 自动解析 — 聊天链接自动解析开关\n/bili开关 手动解析 — /bili解析 命令开关\n/bili开关 LLM解析 — bili_parse_video 工具开关\n/bili开关 解析视频 — 是否发送原视频切片\n/bili开关 筛选 — 主动看视频前标题筛选\n/bili开关 直播回复 — 直播间弹幕互动开关\n/bili联动 — 查看直播伴侣联动状态\n/bili看番 — 手动触发看番\n/bili番剧记忆 — 查看追番进度\n/bili永久记忆 — 查看/删除永久记忆\n/bili动态 — 手动发动态\n/bili绑定 — 绑定QQ与B站UID\n/bili解绑 — 解除绑定\n/bili清理 — 清理临时文件\n/bili帮助 — 本帮助\n/biliUMO — 获取当前UMO并自动填入配置\n━━━━━━━━━━━━\n💡 首次用 /bili登录\n💡 视频池配置不会背编号时，用 /bili分区 查中文填法")
 
     # ===== QQ↔B站 记忆互通 =====
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -2134,7 +2591,10 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         # 命令消息以唤醒词 "/" 开头，is_at_or_wake_command 为 True，不受影响。
         try:
             if event.get_group_id() and event.get_platform_name() != "webchat":
-                if self.config.get("QQ_GROUP_MUTE", False):
+                _v_gid = str(event.get_group_id() or "")
+                if bool(self._qq_group_pref(_v_gid, "mute", self.config.get("QQ_GROUP_MUTE", False))) and not (
+                    event.is_admin() and event.is_at_or_wake_command
+                ):
                     logger.info("[BiliBot] LLM veto: group chat muted")
                     event.stop_event()
                     return
@@ -2142,11 +2602,22 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                     logger.info("[BiliBot] LLM veto: group msg in quiet hours")
                     event.stop_event()
                     return
-                if self.config.get("QQ_NEED_AT", False) and not event.is_at_or_wake_command:
+                if bool(self._qq_group_pref(_v_gid, "need_at", self.config.get("QQ_NEED_AT", False))) and not event.is_at_or_wake_command:
                     logger.info(
                         f"[BiliBot] LLM veto: group msg without @ blocked "
                         f"(sender={event.get_sender_id()})"
                     )
+                    event.stop_event()
+                    return
+            elif (
+                event.get_platform_name() != "webchat"
+                and bool(self.config.get("QQ_PRIVATE_CONTACT_GATE", False))
+            ):
+                if not (
+                    bool(event.is_admin())
+                    or str(event.get_sender_id() or "") in (self._load_json(CONTACTS_FILE, {}) or {})
+                ):
+                    logger.info("[BiliBot] LLM veto: private msg from non-contact")
                     event.stop_event()
                     return
         except Exception:

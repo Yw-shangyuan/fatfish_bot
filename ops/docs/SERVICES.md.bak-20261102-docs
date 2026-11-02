@@ -1,0 +1,100 @@
+# 服务清单（SERVICES.md）
+
+> 实测时间：2026-11-01 14:10 CST。端口占用会被容器重启改变，以 `ss -ltnp` 现查为准。
+
+## 1. 常驻服务一览
+
+| 名称 | 形态 | 跑什么 | 端口 |
+| --- | --- | --- | --- |
+| astrbot.service | systemd 单元 | 机器人本体（AstrBot） | 6185、6199（仅本机） |
+| snowluma | Docker 容器（host 网络） | QQ 协议端 | 3000、3001、5099、5900、6081、9210 |
+| fatfish-qr.service | systemd 单元 | 肥鱼中控面板 + 临时下载口 | 8765 |
+| cron: backup-data.sh | cron | 数据冷备份 | — |
+| cron: sentinel.py | cron（每 5 分钟） | 巡检 + 微信告警 | — |
+| http.server 18080 | 临时进程 | 静态文件下载（cwd=/tmp/dl） | 18080 |
+
+## 2. astrbot.service
+
+- 单元文件：`/etc/systemd/system/astrbot.service`
+- 运行身份：`ubuntu`，`WorkingDirectory=/home/ubuntu/AstrBot`
+- 启动命令：`/home/ubuntu/AstrBot/.venv/bin/python main.py`
+- 自愈：`Restart=always`，`RestartSec=5`
+- 配置：`/home/ubuntu/AstrBot/data/cmd_config.json`（含各 provider、平台接入、persona 设定）
+- 日志：`/home/ubuntu/AstrBot/data/logs/astrbot.log`（单文件，按大小轮转）
+- 监听：6185（Web 接口）、6199（OneBot v11 反向 WebSocket，接收 snowluma 上报，仅 127.0.0.1）
+- 插件目录：`/home/ubuntu/AstrBot/data/plugins/`
+  - `astrbot_plugin_bilibili_ai_bot`：B 站侧行为（主动看视频、评论、私信、看番）
+  - `astrbot_plugin_qq_proactive`：QQ 侧风控与主动搭话（`/qq设置` 等命令的实现）
+- 注意：重启会重载全部插件，B 站登录态与 QQ 会话都会重新初始化，尽量避开活跃时段
+
+## 3. snowluma（Docker）
+
+- 镜像：`motricseven7/snowluma:latest`，`--network host`
+- 作用：QQ 协议端，作为 OneBot 实现向上游 AstrBot 的 6199 反向上报
+- 数据卷：`/srv/snowluma`（`config`、`data`、`local`）
+- OneBot 配置：`/srv/snowluma/data/config/onebot.json`（含 accessToken，本文件不外发）
+- 端口用途：
+  - 3000：OneBot HTTP API（带 Bearer token，未带 token 返回 401）
+  - 3001：WebSocket 服务
+  - 5099：Web 控制台
+  - 5900：VNC 桌面（`config/vnc-password` 为 root 属主）
+  - 6081：静态资源/文件服务
+  - 9210：内部接口（仅本机）
+- 回滚方案：旧容器 `napcat`、`napcat-old-hostbak` 已退出（保留镜像与卷，未删除）
+- 常见动作：`docker restart snowluma`（约 40 秒；若未勾选自动登录需重新扫码）
+
+## 4. fatfish-qr.service（肥鱼中控）
+
+- 代码：`/home/ubuntu/ops/qr_portal.py`（纯标准库，单文件）
+- 单元文件：`/etc/systemd/system/fatfish-qr.service`
+- 用途：
+  - 面板：`http://<IP>:8765/<token>`，可看登录态、取二维码、重启协议端、开关 QQ/B 站闸门
+  - 临时下载口：`http://<IP>:8765/f/<随机 token>/<文件名>`，默认 20 分钟 TTL，过期后 30 秒内自动删目录，支持 Range 断点续传
+  - 工具镜像下载：`/<token>/tools/<文件名>`（来自 `/home/ubuntu/ops/kit`）
+- token 文件：`~/.config/fatfish-qr/token`（0600，勿外发）
+- 下载发布命令：`python3 /home/ubuntu/ops/dropfile.py <文件> [分钟]`
+- 下载目录：`/home/ubuntu/ops/drop/`，访问日志 `drop/access.log`
+- 闸门（静默开关）：`~/.config/fatfish-sentinel/qq_mute`、`bili_mute`，内容为到期时间戳；文件不存在即放行
+- 重启注意：该服务 `Restart=always`，改完代码 `pkill -f qr_portal.py` 会由 systemd 自动拉起，无需 sudo
+
+## 5. 定时任务
+
+    # crontab -l（ubuntu）
+    20 4 */3 * *  /home/ubuntu/backup-data.sh >> /home/ubuntu/backups/backup.log 2>&1
+    */5 * * * *   /home/ubuntu/AstrBot/.venv/bin/python /home/ubuntu/ops/sentinel.py >> /home/ubuntu/ops/sentinel.log 2>&1
+
+- `backup-data.sh`：每 3 天凌晨冷备份一次，期间 QQ 会短暂离线并收到通知
+- `sentinel.py`：每 5 分钟体检（容器存活、astrbot active、QQ 登录态、反向 WS 链路、磁盘 IO 压力），异常经 Server酱 推微信
+
+## 6. 日志位置
+
+| 日志 | 路径 |
+| --- | --- |
+| 机器人主日志 | /home/ubuntu/AstrBot/data/logs/astrbot.log |
+| 巡检日志 | /home/ubuntu/ops/sentinel.log |
+| 备份日志 | /home/ubuntu/backups/backup.log |
+| 面板/下载访问 | /home/ubuntu/ops/drop/access.log |
+| 系统日志 | journalctl -u astrbot / -u fatfish-qr |
+
+## 7. 常用操作
+
+    # 看服务状态
+    systemctl status astrbot --no-pager
+    docker ps --format "{{.Names}} {{.Status}}"
+
+    # 重启（需要 sudo，AI 侧无权限，需人工执行）
+    sudo systemctl restart astrbot
+    docker restart snowluma
+
+    # 看机器人实时日志
+    tail -f /home/ubuntu/AstrBot/data/logs/astrbot.log
+
+    # 发一个临时下载链接
+    python3 /home/ubuntu/ops/dropfile.py /path/to/file 20
+
+## 8. 已知坑
+
+- 备份脚本必须以 root 跑 tar，否则 `snowluma` 卷内 root 文件会 Permission denied 并中断（2026-10-28 事故）
+- AstrBot 重启后 B 站私信监听会延迟 180 秒启动，避免接口风控
+- snowluma 重启后若未自动登录，需要到面板点「取最新码」重新扫码
+- 2 核 3.6G，同时跑备份 + 编译类任务容易把磁盘 IO 打满，触发哨兵告警

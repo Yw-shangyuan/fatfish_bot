@@ -1,0 +1,393 @@
+# 插件功能与架构总览
+
+更新时间：2026-11-02 17:41 CST（bilibili 插件「群级覆盖 + 私聊联系人」功能上线并重启生效后修订）
+取证方式：全量只读取证 + 上线后 `systemctl show` / 日志窗口复核。§2/§3.2/§3.4 的行号与命令数为 17:41 版重测值；其余小节行号因常量与 helper 插入存在整体位移（约 +7 至 +275），引用前以 grep 现查为准。改动前版本备份：插件三文件 `*.bak-20261102-groups`。
+适用范围：本机三个 AstrBot 插件及其主机侧配套。服务与端口见 `SERVICES.md`，硬件与权限边界见 `SERVER.md`，鱼箱改动交接见 `HANDOFF-fishbox.md`，接手流程与红线见 `接入须知.md`。
+
+> 本文只写路径与键名，不写任何密钥值、Cookie 值与账号凭据（遵循本目录约定第 1 条）。
+
+---
+
+## 1. 运行拓扑
+
+```
+QQ 客户端
+   |
+   v
+snowluma 容器（motricseven7/snowluma:latest，--net=host，restart=unless-stopped）
+   3000 OneBot HTTP | 3001 OneBot WS | 5099 Web 控制台 | 5900 VNC | 6081 noVNC | 9210 内部
+   卷：/srv/snowluma/{local,data,config} -> /app
+   |
+   | OneBot 反向 WebSocket：snowluma 作为 WS-Client 主动外拨（容器日志 [OneBot.WS-Client]）
+   v
+ws://127.0.0.1:6199/ws   <- 由 AstrBot 监听
+   |
+astrbot.service（systemd，Restart=always/5s，WorkingDirectory=/home/ubuntu/AstrBot）
+   /home/ubuntu/AstrBot/.venv/bin/python main.py        WebUI :6185
+   |
+   +-- 插件 astrbot_plugin_bilibili_ai_bot   功能主体（B 站行为 + QQ 侧风控）
+   +-- 插件 astrbot_plugin_fishbox           工具沙箱桥接
+   +-- 插件 astrbot_plugin_qq_proactive      主动伴聊（当前关闭）
+   |
+   +-- unix socket /home/ubuntu/fishbox/fishbox.sock
+          -> executor 为每次调用起独立进程执行白名单工具（cron 保活）
+
+外围：fatfish-qr.service :8765（中控面板）
+      ops/sentinel.py（cron 每 5 分钟 -> Server酱微信告警）
+      backup-data.sh（cron 每 3 天 -> age 加密 -> GitHub 孤立分支）
+```
+
+先读这三条，否则会误判：
+
+1. **AstrBot 不直连 QQ**。协议端是 snowluma，它反向连 AstrBot 的 6199。重启 astrbot 会让该连接短暂 ECONNREFUSED，属预期，约 10 秒恢复。
+2. **适配器名 `napcat-qq` 是历史遗留标签**。`data/cmd_config.json` 的 `platform` 两项：`No.1`(type=`qq_official`) 与 `napcat-qq`(type=`aiocqhttp`，name=QQ-NapCat)，均 `enable=true`。`napcat` 与 `napcat-old-hostbak` 两个容器已 `Exited (137)`，保留仅作回滚。查 `:6159` 连接数为 0 属正常。
+3. **工具改动不需重启，插件改动需重启**。沙箱每次调用起新进程，读的就是磁盘新代码；插件常驻 AstrBot 进程内。
+
+### 1.1 一个贯穿全局的事实：三个插件共享同一条出站通道
+
+`astrbot_plugin_bilibili_ai_bot` 在加载时**直接替换** `AiocqhttpMessageEvent.send_message`（`main.py:62-110`）：每条 QQ 出站消息之间强制 5~12 秒随机间隔，队列等待超 120 秒即**静默丢弃**（`main.py:88-93`，warning 级），并在 `main.py:83-85` 检查 `qq_mute` 文件。
+
+因此同机的 `astrbot_plugin_fishbox` 与 `astrbot_plugin_qq_proactive` 的 QQ 发送**同样被节流与拦截**。排查「卡组解析发出很慢」或「某插件的 QQ 消息没出来」时，必须先想到这一层，而不是去查各自的插件。
+
+### 1.2 AstrBot 侧关键配置实测
+
+- `wake_prefix=["/"]`（全局配置本体 `data/cmd_config.json`，即 `astrbot/core/config/astrbot_config.py:22` 定义的 `ASTRBOT_CONFIG_PATH`）。
+- `admins_id` 含三个条目（含 bot 属主的 QQ 号，值见该文件，本文不重复）。`event.is_admin()` **仅表示发送者 UID 在该列表内**（`astrbot/core/pipeline/waking_check/stage.py:83-88` + `astrbot/core/platform/astr_message_event.py:319-321`），**与 QQ 群内职务无关**。
+- 默认 LLM 回复还需 `event.is_at_or_wake_command` 为真（`astrbot/core/pipeline/process_stage/stage.py:66-70`）；该标志在 `waking_check/stage.py:106,133,142` 置位：@机器人、@全体成员、引用 bot 消息、命中 `wake_prefix`、私聊（`friend_message_needs_wake_prefix=false` 时）。
+
+---
+
+## 2. 插件清单
+
+| 插件 | 声明版本 | 代码量 | 注册命令 | 运行态 |
+|:---|:---|:---|:---|:---|
+| `astrbot_plugin_bilibili_ai_bot` | metadata `1.6.1`（CHANGELOG 最新条目 `v1.7.0` 2026-10-30；**功能已远超此声明**，见 §7.3 #12） | Python 37275 行（含 tests 约 9000 行不参与运行）；`core/` 40+ 模块 | 58 | 启用，功能主体 |
+| `astrbot_plugin_fishbox` | `0.2.0` | main.py 280 行 | 2 | 启用 |
+| `astrbot_plugin_qq_proactive` | `1.0.0` | main.py 333 行 | 1 | **`ENABLE=false`，实际闲置** |
+
+命令数按 `@filter.command` 注册字面量去重统计。上游仓库：bilibili 插件 `https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot`（本机为 git clone 安装，目录内含 `.git`）；另两个为本机自研，`repo` 字段为空，WebUI 以 `author/name` 兜底显示。
+
+人工维护用的工作副本在本地 `D:\AIagent\napcat\remote\`：`plugin_main_work.py` 与服务器上 bilibili 插件 `main.py` 逐字节一致（2026-11-02 17:41 版，MD5 `c77ff02ec60ce5d55ee37dfc8cbdb6fa`），另有 `core_reply_work.py`、`_conf_schema_work.json`、`README_work.md`、`CHANGELOG_work.md` 同插件副本。
+
+---
+
+## 3. astrbot_plugin_bilibili_ai_bot（主力）
+
+### 3.1 功能矩阵
+
+| 类别 | 能力 |
+|:---|:---|
+| 评论互动 | 评论自动回复、@通知回复、动态评论区回复、评论图片识别、视频上下文（视觉模型分析封面/内容）、联网查询（Tavily / Firecrawl / Grok / Perplexity / 博查 / 自定义 OpenAI 兼容） |
+| 私信 | 纯文字与视频分享私信监听；先短回应、查完再整合，单会话最多两条；安全隔离（不明外链 / IP 链接 / 疑似引流不进模型，可自动拉黑）；回复范围分「仅主人 / 白名单 / 全部安全用户」 |
+| 直播 | 进入指定直播间读弹幕，结合人设 + UID 画像 + 直播记忆生成短回应，用自己账号发回同一直播间；无需直播伴侣 |
+| 记忆与人格 | 语义记忆（Embedding + 余弦检索、压缩、永久记忆）、好感度分级（陌生人→粉丝→熟人→好友→主人，辱骂自动拉黑）、词条式用户画像、每日心情 + 农历节日彩蛋、性格演化（实验性，默认关，历史数据保留） |
+| 主动行为 | 主动看视频（关注 / 关键词搜索 / 视频池三源按当天序号轮转，缺候选自动补位）、一周分区口味统计、LLM 标题预筛、给主人分享视频、自动发动态（可生图）、周总结 PNG 卡片、每日自主作息、跨端活动同步（同步到已绑定 `OWNER_MID` 的主人 QQ 私聊）。行为**只设每日硬上限，不设必须完成数** |
+| 番剧 | 搜索 / 详情 / 完整观看、字幕 + 热评分析、番剧记忆、评分达阈值自动追番、更新查询、QQ 内直接命令看番 |
+| LLM 工具 | 默认注册 8 个（开启私信分享则 9 个）：`bili_recall`、`search_bilibili`、看视频链式互动、`bili_action`（赞/币/藏/关/评，需同意）、`bili_bangumi`、`watch_and_share_video_private`（默认关）、拉黑 |
+| 运维与安全 | 插件级独立代理 `PROXY_URL`（不影响宿主与其他插件）、LLM 熔断、基础防注入、Cookie 周期检查 + 自动刷新 + 扫码、黑名单用户不调模型、评论区被攻击时经 QQ 私信告警主人 |
+
+### 3.2 QQ 消息「回 / 不回」完整决策链
+
+排序依据：AstrBot 按 `-priority` **降序**执行 handler（`astrbot/core/star/star_handler.py:26`），**数值越大越先跑**。任一 handler 调用 `stop_event()`（定义 `astr_message_event.py:399-405`）后，后续 handler 全部中断（`pipeline/process_stage/method/star_request.py:40-41,88-89`），默认 LLM 回复链也被跳过（`process_stage/stage.py:66-76`）。
+
+下表中 `main.py` 指该插件主文件。
+
+| 顺序 | 位置 | priority | 行为 |
+|:---|:---|:---|:---|
+| 1 | `main.py:563-572` `on_qq_mute_gate` | 9999 | 读 `~/.config/fatfish-sentinel/qq_mute` 的到期时间戳（`main.py:54-66`），未过期即 `stop_event()`，全链路终止。文件缺失或已过期=放行（fail-open）。事件类型为 `ALL` 且**未排除 webchat** |
+| 2 | `main.py:575-578` `on_group_bili_share` | 850 | 转 `_handle_bili_share(auto)`（`core/share.py:588-657`）。总开关 `ENABLE_BILI_SHARE_PARSE`（运行时为 `False`）关闭时立即 return，不 yield 不 stop；**群聊路径不吞事件**。私聊路径 `main.py:580-587` 命中即 `stop_event()` |
+| 3 | `main.py:1073-1102` `on_qq_context_capture` | 70 | **只记录不拦截**：`_qq_ctx_buf[gid] = [...][-10:]`，条目为 `(时间戳, 昵称≤20 字, 文本≤120 字)`。刻意早于 65/60 两级，使评分时能拿到含当前消息的缓冲 |
+| 4 | `main.py:1196-1279` `on_qq_safety_gate` | 65 | 风控闸门（群级覆盖 + 私聊联系人闸在此层），内部顺序见下 |
+| 5 | `main.py:991-1071` `on_owner_worthy_gate` | 60 | 价值评分闸门，内部顺序见下 |
+| 6 | AstrBot `process_stage/stage.py:66-76` | — | 前面全部放行后才由宿主决定是否调默认 LLM；**还需 `is_at_or_wake_command` 为真** |
+
+**priority 65 风控闸门内部顺序**（`main.py:1197-1279`）：
+
+1. webchat 直接放行（`1204-1205`）。
+2. 命令放行：`_qq_is_command()` 从组件文本判断是否 `/` 开头（`1138-1154,1208-1209`）。
+3. 陈旧消息丢弃：读 `message_obj.raw_message["time"]`（**绕开 AstrBot 已覆盖的 timestamp**），`age > QQ_STALE_MAX_AGE_SEC=1800` → `stop_event()`（`1212-1223`，常量 `main.py:46`）。
+4. 群聊四连（`1229-1247`）：`_qq_group_pref(gid,"mute")`（群级覆盖优先，回落 `QQ_GROUP_MUTE`）→ **静音群仅「主人且@到肥鱼」豁免**（`is_admin() and is_at_or_wake_command`，主人正常发言不豁免），其余停；`_qq_quiet_window()` 命中静默时段 → 停（`1115-1135`，支持跨午夜）；`_qq_group_pref(gid,"need_at")` 且未 @ → 停。
+5. 私聊分支（`1247-1260`）：`QQ_PRIVATE_CONTACT_GATE` 开启时，非 `is_admin()` 且 sender 不在 `contacts.json` → 停（日志 `私聊闸门静默`）；关闭（当前默认）时行为与历史完全一致——所有私聊放行。
+6. 限流（`1261-1279`）：`QQ_RATE_PER_MIN>0` 时维护 `_qq_rate_marks` 60 秒滑动窗，计「本闸门放行票数」（**不分群**），达上限 → 停并置 `_qq_rate_block_until = now + QQ_RATE_COOLDOWN_SEC`，冷却期内全停。
+
+注释自陈：被本闸门拦下的消息不会走到 worthy 闸门，**零 LLM 花费**（`main.py:1200-1202`）。
+
+**priority 60 价值闸门内部顺序**（`main.py:991-1071`）：
+
+1. **群友分支优先，且与模式无关**（`1001-1027`）：条件 `gid 非空 且 not is_admin()` → 读 `_qq_group_pref(gid,"willing")`（群级覆盖优先，回落 `QQ_GROUP_GUEST_WILLING`，`1007`）；`=100` 直接放行；文本空 / `/` 开头 / 超 800 字放行；被 @ 时给文本追加「（注：这条消息@了肥鱼）」（`1013-1014`）；去重键 `gid+"|g"`，5 秒窗口内**直接放行**（`1019-1021`）；否则 `await _owner_group_value(..., who="群友")`，判否 → `stop_event()`。
+2. 主人链路前置（`1028-1035`）：`OWNER_WORTHY_GATE` 为真 → `_mode_owner_gate_enabled()` 为真 → `is_admin()` → 非 webchat。**任一为假即提前 return，主人闸门整体不生效。**
+3. 群聊主人（`1046-1065`）：`QQ_GROUP_OWNER_WILLING`；`=100` 放行；去重键 `gid`，5 秒窗口内放行；否则 `_owner_group_value(..., who="主人")`，判否 → `stop_event()`。
+4. 私聊主人（`1066-1071`）：`if not event.is_at_or_wake_command: return`；否则 `_should_reply_by_interest(text, "主人", channel="owner")`，判否 → `stop_event()`。
+
+> **「主人 / 群友」的准确含义**：由 `admins_id` 判定，不是群内职务。未进 `admins_id` 的人即便是该群群主也走「群友」链路；任何被加进 `admins_id` 的 QQ 号在群里发言都走「群主人」链路。
+
+**由此得出的当前实际行为**（`wake_prefix=["/"]` 且 `QQ_NEED_AT=False`）：群里**未被 @** 的消息，即使评分通过也不会被回答（第 6 步 `is_at_or_wake_command` 不成立）；插件侧全仓未设置 `call_llm`。私聊因 `friend_message_needs_wake_prefix=false` 恒为唤醒态，故默认 LLM 正常回复。
+
+### 3.3 价值评分机制细节
+
+- **入口**：`core/reply.py:156-202 _owner_group_value(content, gid, willing, who)`。主人与群友**共用同一函数**（docstring 明确），仅 `who` 区分；调用点 `main.py:1022`（群友）与 `main.py:1060`（主人）。
+- **阈值换算**：`threshold = 100 - int(willing)`，判定 `score > threshold`（**严格大于**，`reply.py:180,199`）。故 `willing=50` 时 50 分被静默——日志实证：`14:14:49 群友意愿闸门静默：50分：个人配件偏好，可接但非必答`。
+- **评分提示词**（`reply.py:181-190`，关键原文）：
+
+  ```
+  只输出严格 JSON：{"score":整数,"reason":"不超过30字"}。
+  评分锚点：
+  - 点名或@肥鱼、直接向肥鱼提问或下指令 → 80-100
+  - 有实质内容、能接话或值得分享观点 → 50-79
+  - 普通闲聊、顺着前文的追问 → 30-49
+  - 复读刷屏、无信息量、回不回都行 → 0-29
+  ```
+
+  末尾拼「群里前几条消息（旧→新）」+「最新消息：`content[:800]`」。无维度拆分，单一 0-100 分。
+- **上下文组装**：写入方 priority 70（每群滚动 10 条）；评分端 `reply.py:173-179` 取 `entries = buf[gid][:-1]`（**跳过末条=当前消息本身**），`in5` 为 5 秒内条数，`n = min(max(3, in5), cap, len(entries))`——即默认至少 3 条、连发全带、不超 `QQ_GROUP_OWNER_CTX`；单条截 80 字。
+- **去重**：`OWNER_GATE_DEDUP_SEC = 5.0`（`main.py:49`）。群主人键 `gid`、群友键 `gid+"|g"`，注释明确「互不搭车」（`main.py:1000`）。语义**不对称于直觉**：两者命中缓存都是**直接放行**（`1019-1021`、`1058-1059`），不是「沿用首轮结论」，因此 5 秒内连发的后续消息一律免检。
+- **失败策略**：群价值评分 **fail-open**（`reply.py:200-202` 捕获一切异常返回 `(True, "owner_group_gate_fail_open")`，注释「宁可多答不可漏答」）；私聊主人闸门同样 fail-open（`reply.py:149-151`）。对照：非 owner 的 B 站评论链路是**确定性回退**而非放行（`reply.py:152-154`）。
+- **私聊主人另一条链路**：`reply.py:111-154 _should_reply_by_interest(channel="owner")`，输出 `{"reply":bool,"reason":...}`，尺度文案随 `QQ_ACTIVE_SCORE` 三档切换（`116-121`）。
+- **模型来源**：两者都走 `self._llm_call(prompt, max_tokens=120/160)` → `core/llm.py:240-298`，即 AstrBot 默认聊天 provider，与正式回复同一模型；带熔断器，**熔断打开时 `_llm_call` 直接返回 None**（`llm.py:244-248`）。
+
+### 3.4 QQ 侧旋钮全集（键名 / schema 默认 / 服务器运行时实值）
+
+默认值逐项核对自 `_conf_schema.json`；运行时实值取自 `data/config/astrbot_plugin_bilibili_ai_bot_config.json`。
+
+| 命令（位置） | 键 | 默认 | 运行时 | 效果 |
+|:---|:---|:---|:---|:---|
+| `/qq设置` `main.py:1282-1302` | 只读汇总 | — | — | 一次性回显全部旋钮 + 群覆盖数 + 私聊闸状态 + 当前 `QQ_MODE`；面板文案 `1290-1298` 自带操作提示，是运行时最省事的总览 |
+| `/qq静默` `:1303-1337` | `QQ_QUIET_HOURS` | `""` | **`00:50-07:30`** | 命中时段群聊完全装死，私聊不受限；留空=关闭；解析 `:1115-1135`，非法格式视为关闭。**全局项，无群级覆盖**（静默期内主人@也不豁免） |
+| `/qq活跃` `:1340-1351` | `QQ_ACTIVE_SCORE` | 50 | **30** | 「低=从严装死，高=从宽秒回」（`reply.py:114`）；≤30 走从严文案、≥70 从宽、否则适中。**仅作用于私聊主人闸门** |
+| `/qq意愿` `:1354-1368` | `QQ_GROUP_OWNER_WILLING` | 100 | **60** | 100=必回零成本；<100 只回「价值分 > 100−意愿」，当前门槛 40 |
+| `/qq群友意愿` `:1371-1385` | `QQ_GROUP_GUEST_WILLING` | 100 | **40** | 门槛 60；schema 原话「被@肥鱼的消息必高分」「被拦消息零 LLM 花费」。可被群级 willing 覆盖 |
+| `/qq上下文` `:1388-1401` | `QQ_GROUP_OWNER_CTX` | 5 | 5 | 评分附带群上下文条数上限（0-10），0=不带 |
+| `/qq限流` `:1404-1425` | `QQ_RATE_PER_MIN` / `QQ_RATE_COOLDOWN_SEC` | 0 / 0 | **10 / 180** | 每分钟放行条数上限与超限冷却；上限 60 条 / 3600 秒 |
+| `/qq要@` `:1428-1445` | `QQ_NEED_AT` | False | False | 「开启后群里没有 @ 的消息一律静默（**对所有人生效，含主人**），私聊不受影响」。可被群级 need_at 覆盖 |
+| `/qq群聊` `:1448-1465` | `QQ_GROUP_MUTE` | False | 未落盘 | 群聊全禁。**该键不在 `_conf_schema.json`** → 管理面板不可见、无校验、迁移易漏。可被群级 mute 覆盖 |
+| `/qq群` `:1468-1510` | 只读 | — | 覆盖 0 群 | **新增**：无参看本群三项生效值（标注覆盖/默认）；`/qq群 列表` 总览全部覆盖群 |
+| `/qq群@` `:1511-1535` | `group_prefs.json[gid].need_at` | 无 | 空 | **新增**：单群要@三态 `开/关/默认`（默认=撤销覆盖回落全局），尾部可加群号跨群操作 |
+| `/qq群静音` `:1536-1560` | `group_prefs.json[gid].mute` | 无 | 空 | **新增**：单群静音三态。开=该群全员装死，**仅「主人且@肥鱼」豁免**；关=单独豁免全局全禁；命令不受影响 |
+| `/qq群意愿` `:1561-1583` | `group_prefs.json[gid].willing` | 无 | 空 | **新增**：单群群友意愿 0-100 或 默认；100=免检直回（与全局同语义） |
+| `/qq群忘记` `:1584-1600` | `group_prefs.json[gid]` | — | — | **新增**：清空该群全部覆盖，整群回落全局 |
+| `/qq联系人` `:1601-1639` | `contacts.json` | — | 0 人 | **新增**：查看 / `+QQ号 [备注]` / `-QQ号`。名单仅决定**私聊闸门**豁免，无任何其他特权语义；主人（admins_id）天然豁免、无需添加 |
+| `/qq私信闸` `:1640-1665` | `QQ_PRIVATE_CONTACT_GATE` | False | **False** | **新增**：陌生人私聊闸门。开=仅主人与联系人可被回复；名单为空时拒绝开启（防锁死）。webchat 与命令不受影响 |
+| `/qq模式` `:1105` | `QQ_MODE` | normal | **tieba** | 见 3.5 |
+| `/bili模式` `:1110` | `BILI_MODE` | normal | normal | 见 3.5 |
+| （无常驻命令） | `OWNER_WORTHY_GATE` | True | True | 仅对开了 `owner_gate` 的模式生效（schema 原话） |
+| （无常驻命令） | `MODE_PERSONA_ID` | `宇文尚元的蓝色大肥鱼` | 同 | schema 警告「必须与 agent_runner 当前引用的人格一致，否则切的不是这只」 |
+| 硬编码常量 | `OWNER_GATE_DEDUP_SEC=5.0` `main.py:49` | 5.0 | — | 连发去重窗口，**无命令可改，改一次要重启** |
+| 硬编码常量 | `QQ_STALE_MAX_AGE_SEC=1800` `main.py:46` | 1800 | — | 重连补投的离线消息丢弃阈值 |
+| 硬编码常量 | `QQ_SEND_MIN_GAP=5.0` / `QQ_SEND_MAX_GAP=12.0` / `QQ_SEND_QUEUE_LIMIT=120.0` `main.py:40-42` | 同 | — | 出站随机间隔与队列上限 |
+
+`qq*` 共 **20** 条注册命令 = 17 条风控/模式/群与联系人管理（上表中 `qq设置`…`qq模式` 的 17 项命令，含 2026-11-02 新增 7 条）+ 3 条只读查看器（`qq人格` `qq知识库` `qq白名单`）。群级覆盖表 `group_prefs.json` 与联系人 `contacts.json` 是**插件数据目录文件而非配置键**（面板 schema 无 dict 类型，见 §3.8），所有读写走 `_save_json` 原子写，改后立即生效、重启不丢。
+
+### 3.5 模式系统究竟切了什么
+
+实现在 `core/modes.py`，命令入口 `main.py:1098-1105`。
+
+- **`/qq模式`** 调 `_mode_apply("qq", key)`（`modes.py:103-153`），只做三件事：① 用模式文件的 `persona.system_prompt` 调 `persona_manager.update_persona(MODE_PERSONA_ID, ...)` 热换 AstrBot 人格（人格被删则 `create_persona` 重建，`128-132`）；② 应用 `overrides`，白名单**只有** `BILI_SHARE_PARSE_AUTO_TRIGGER_ENABLED`（`modes.py:21-24`），名单外键忽略并告警（`143-144`）；③ 落盘 `QQ_MODE` 并清缓存。**没有任何 handler 被关闭或开启，没有任何后台任务被停止。**
+- **`owner_gate` 标志**（模式文件内）经 `_mode_owner_gate_enabled()`（`modes.py:96-101`）决定 3.2 第 5 步的主人闸门是否生效。自带模式实测：`modes/qq/normal.json` `owner_gate=true`；`simple.json`、`tieba.json` `owner_gate=false`。
+- **模式文件查找顺序**：自带 `modes/qq/` 在前，`plugin_data/modes/qq/` 同名覆盖（`modes.py:33-38`）；新增文件即新模式。
+- **`/bili模式`** 只覆盖 `CUSTOM_SYSTEM_PROMPT` / `CUSTOM_REPLY_INSTRUCTION` 两键文案（`modes.py:21-24`）；`owner_gate` 缺失即 None，B 站侧无闸门语义。
+
+### 3.6 只读查看器（不改变回复行为）
+
+把 AstrBot 侧的只读视图搬到 QQ，均需先入白名单且**仅私聊可用**（数据目录常量 `_QQ_VIEW_DATA_DIR` 定义于 `main.py:27`）：
+
+- `/qq人格` `main.py:1721-1762`：列举/查看 `data_v4.db` 的 `personas.system_prompt`；群聊内直接拒绝；sqlite 以 `file:...?mode=ro` 打开；超 1800 字分片发送。
+- `/qq知识库` `main.py:1763-1816`：扫描 `data/knowledge_base/<kb_id>/doc.db`。
+- `/qq白名单` `main.py:1817-1852`：维护 `QQ_VIEW_WHITELIST_PERSONAS` / `QQ_VIEW_WHITELIST_KBS`（默认为空=全不可查），语法 `+人格:<名>` / `-知识库:<名>`。
+
+### 3.7 装配骨架
+
+```
+class BiliBiliBot(Star, +19 Mixin)                 main.py:123
+  Mixin 由 core/__init__.py 以 PEP562 惰性导入登记（:14-42, __getattr__ :47-56）
+  进程级单例 _ACTIVE_BILIBOT                        main.py:24,185-186
+  __init__ 构造顺序：
+    :168 LayeredRuntime(config, LAYERED_DB_FILE)    持 SQLite
+    :175 EventRuntime(observer=layered_runtime)     与上层共享同一 sqlite
+    :183 ConsolidationEngine                        日终清算
+    :184 BiliBotMemoryAPI                           供其它插件跨插件读写记忆
+    :190 create_tools() -> context.add_llm_tools    8~9 个工具
+    :199 register_webui(self, context)              25 个路由
+```
+
+模块体量排序（行数）：`proactive.py` 2213、`private_messages.py` 1491、`video.py` 1401、`memory.py` 1257、`reply.py` 1250、`storage/stores.py` 1213、`weekly.py` 1203、`webui_bridge.py` 1144、`tools.py` 1053、`bilibili.py` 979、`bangumi.py` 963、`schedule_mixin.py` 879、`personality.py` 752、`share.py` 719、`runtime.py` 717、`live_danmaku.py` 687、`consolidation.py` 541、`layered_runtime.py` 515、`memory_api.py` 448、`affection.py` 436、`dynamic.py` 427、`utils.py` 418、`persona/engine.py` 401、`search.py` 396、`adapter/events.py` 382、`capability.py` 341、`llm.py` 313。
+
+### 3.8 持久层（双轨；运行时数据不在插件代码目录）
+
+运行时数据目录 `/home/ubuntu/AstrBot/data/plugin_data/astrbot_plugin_bilibili_ai_bot/`，实测约 8.6MB。
+
+- **JSON**：`memory.json` 2693690 B（语义记忆主文件）、`affection.json`（0600）、`user_profiles.json`、`mood.json`、`video_memory.json`、`watch_log.json` / `seen_videos.json`、`bangumi_*.json`、各类 `*_log`（`PROACTIVE_TRIGGER_LOG` 滚动留最近 200 条，`main.py:411`）、`*_schedule.json` 当日日程、`web_search_cache.json`、`security_log.json`、`qq_bili_bindings.json`、**`group_prefs.json`（群级覆盖表，2026-11-02 新增，尚无该文件=零覆盖）**、**`contacts.json`（私聊联系人名单，2026-11-02 新增，首次 `/qq联系人 +` 时创建）**。读写经 `UtilsMixin._load_json/_save_json`（`utils.py:65-114`，`mkstemp`+`os.replace`+`fsync` 原子写，按路径分锁）。
+- **SQLite** `bilibot.sqlite3`(+WAL/-shm)：实测 1142784 B + WAL 4157112 B。约 22 张表：`events`/`event_transitions`/`actions`、`memories`/`memory_vectors`/`legacy_memory_map`、`seen_videos`、`feedback_candidates`、`preference_evidence`/`preferences`、`profiles`/`profile_facts`、`media_digests`、`cycle_summaries`、`kv`、`counters`、`capabilities`（写操作一次性授权）、`audit_log`、`life_states`/`day_plans`/`goals`（自主作息）、`model_usage`（token 计量）、`meta`。封装 `storage/db.py`（单连接 + `asyncio.Lock` + `asyncio.to_thread` + WAL）、`storage/stores.py`（6 个 store）。
+- **清理**：SQLite 侧 `purge_expired`（Memory/Purge/Profile/Media）与 `MediaStore.evict_lru(keep=100)`；日终清算做记忆分级（long_term / aged）与丢弃；`temp_images`、`temp_videos` 由 `_purge_cache` 清理。**JSON 主文件无按 TTL 自动删除机制**，依赖模型清算与手动/面板 purge。
+
+### 3.9 后台任务
+
+单一主循环 task `name="astrbot_plugin_bilibili_ai_bot.main_loop"`（`main.py:25,295-297`；热重载按名清理残留 task `:251-265`），周期 `POLL_INTERVAL` 默认 20 秒，按开关派生子任务：
+
+| 子任务 | 开关 / 时点 | 位置 |
+|:---|:---|:---|
+| 日终清算、日/周总结 | 睡眠时段 `SLEEP_START=2`~`SLEEP_END=8` | `main.py:368-388` |
+| 主动看视频 | `ENABLE_PROACTIVE` | `:393-413` |
+| 发动态 | `ENABLE_DYNAMIC` | `:414-431` |
+| 私信轮询 | `ENABLE_PRIVATE_MESSAGES` | `:432` |
+| 统一回复轮询 | `ENABLE_REPLY` | `:434` |
+| 看番 / 追番更新 | `ENABLE_BANGUMI` + `BANGUMI_PROACTIVE` | `:437-472` |
+| 关注动态巡视、特别关注 | `ENABLE_DYNAMIC_WATCH` / `SPECIAL_FOLLOW_ENABLED` | `:474-510` |
+| Cookie 检查刷新 | `COOKIE_CHECK_INTERVAL` 默认 6h | `:389-392,519-527` |
+| 直播弹幕监听 + 回复 worker | 随启停 | `live_danmaku.py:107,144,310` |
+| 动作 worker | PriorityQueue 单 worker | `runtime.py:217-220` |
+
+各类任务用 `*_task` 句柄去重；`_stop_bot`（`:304-340`）逐个 cancel；`terminate`（`:529-553`）依次 _stop_bot → 扩展注册表关闭 → 关闭插件网络客户端 → `event_runtime.close` → `layered_runtime.close` → 清单例 → 清临时文件。生命周期完整。**插件不自建 cron，也不自建监听端口。**
+
+### 3.10 模型调用面
+
+- 统一入口 `core/llm.py`：`_llm_call()` 走 AstrBot `context.llm_generate(...)`（`llm.py:266`）；`_task_llm_call(purpose=SUMMARY/GENERATION)` 可选 AstrBot provider 或独立 OpenAI 兼容端点（`llm.py:64-68`）。**全部非流式**。
+- 全局熔断：连续 5 次失败冷却 120 秒，恢复时半开单探测（`llm.py:112-187`）。
+- 调用点约 16 处（`reply.py:141,192,632,685,1206,1236`；`personality.py:540,647`；`private_messages.py:377`；`schedule_mixin.py:405`；`search.py:338,380`；`vision.py:84,164`；`consolidation` 批评）。
+- 失败普遍 **fail-open**：批评失败整批保留（`consolidation.py:397-399`）、单条漏评默认升 recent（importance 5 > 阈值 3，`:419-425`）、回复生成失败跳过回复、辅助库异常绝不打断主链（`runtime.py:270-274`）、`layered_runtime` 打开失败回退兼容 JSON 主链（`main.py:207-219`）。异常细节先脱敏再入日志。
+
+### 3.11 配置面
+
+`_conf_schema.json` 顶层 **276** 项：int 100 / bool 64 / string 59 / list 24 / text 22 / float 7（**schema 无 dict/object 类型**，群级覆盖因此落文件而非配置键）。按主题：凭据与账号 13、功能开关约 128、模型 25、视觉与视频 33、时序 55、联网搜索 11、好感度与心情 16。读取统一 `self.config.get(KEY, default)`；运行时配置落 `data/config/astrbot_plugin_bilibili_ai_bot_config.json`（16977 B，**带 UTF-8 BOM，程序读取须用 `utf-8-sig`**）。
+
+### 3.12 安全层
+
+- `core/security/redact.py`：出站对 SESSDATA / bili_jct / DedeUserID / buvid / refresh_token / Bearer / `sk-` / api_key / IP / 家目录路径一律掩码（`:37-61`），`contains_credentials` 硬闸（`:143-145`）；入站 `sanitize_inbound` 只打风险分不改写（`:102-114`，≥0.5 可疑、≥0.85 敌意）、`wrap_untrusted` 以 untrusted 标签包裹不可信内容（`:117-123`）；出站额外屏蔽内部机制词（好感度 / UID / 记忆系统，`:126-140`）；工具返回统一截断 1500（`:161-166`）。
+- 写授权与会话隔离：`capability.py`（一次性 capability）、`scopes.py`、`toolgate.py`、`identity.py`、`governance/behavior.py`（行为预算闸门）。
+- 内置 WebUI：`webui_bridge.py` **不自建端口**，用 `context.register_web_api()` 把 25 个路由挂到 AstrBot 自带 WebUI，前缀 `/astrbot_plugin_bilibili_ai_bot/`（config 读写、账号二维码、memory/purge、cache/purge、extensions/action 等）。GET 侧过滤敏感键（`PROTECTED_CONFIG_KEYS`，`:44,160-162`）。
+
+### 3.13 可观测性现状
+
+- **判定结果只进日志、不落库**。装死原因走 `logger.info` 五处：`main.py:1026`（群友）、`:1064`（群主人）、`:1071`（私聊主人）、`:1259`（私聊闸门）、`:1277`（限流）；另有 LLM 终极否决四处 `:2598/:2602/:2607/:2620`、出站静默 `:91/:96-99`、stale 丢弃 `:1176`（debug 级）。
+- 日志格式含分数与理由，例：`main:1026]: [BiliBot] 群友意愿闸门静默：35分：仅简短建议，未点名，可接话但信息量少`。
+- **`/bili日志` 看不到 QQ 侧**：`main.py:2009-2037` 只有 `视频/番剧/动态/回复` 四类渲染器，且 `回复` 读的 `reply_log.json` 仅由 B 站评论链路（`core/reply.py:850-864`）与 B 站私信（`core/private_messages.py:1070-1080`）写入。**QQ 的回复与装死判定无任何命令可回看，只能登服务器 grep 日志。**
+
+---
+
+## 4. astrbot_plugin_fishbox（工具沙箱桥接）
+
+```
+群消息 -> 正则 finditer 全量取卡组码（去重、字符种类>=10 防误判）
+       -> 闸门：同码同群 60s / 跨消息批次 10s / 每群每小时 30 套（按解出套数扣额度）
+       -> 单条消息最多 10 套，超出只报数量不解析
+       -> 逐套串行 client.run() -> unix socket -> executor 独立进程 -> 工具
+       -> 1 套＝纯文本；>=2 套或有溢出＝一条合并转发（每套一节点，节点署名取职业名，截断 20 字）
+```
+
+- 命令 `/鱼箱 <工具名> <JSON>`、`/鱼箱列表`，仅管理员。
+- 管理员判定为 `event.is_admin()`，即命中 `data/cmd_config.json` 的 `admins_id`；`main.py` 中原先写死的默认 QQ 号已删除，`FISHBOX_OWNER` 环境变量仅作可选覆盖，未设置时不匹配任何人。
+- 工具两个：`echo`（链路自检）、`hearthstone_deck`（卡组解码，输入 code，输出 `hero` / `hero_class` / `total` / `cards[]`）。
+- 卡表实际路径 `cache/hearthstone_deck/cards_zhcn.json`，10221741 B，**不在工具目录内**。
+- 真机验证：2026-11-02 14:33:50 收到码 → 14:33:51 日志 `Prepare to send ... [ComponentType.Nodes]`，同窗口零报错。
+- 生效规则：改 `tools/*/main.py` 不需重启；改插件 `main.py` **必须重启 astrbot**。
+- **配置已接线**：`_conf_schema.json` 声明的 5 项全部生效，读取优先级为环境变量 `FISHBOX_DIR`/`FISHBOX_SOCK` > WebUI 面板 > schema 默认值；输出截断拆为两个独立键——`max_deck_text`（默认 900，卡组文本发往群聊）与 `max_tool_output`（默认 1500，工具结果回给模型）。
+- 回滚点：改造前为 `main.py.bak-20261102-compatfix`，多卡合并转发改造前为 `main.py.bak-20261102`。
+- 与其他插件的关系：见 1.1（被 bilibili 插件的出站节流与 `qq_mute` 拦截）与 7.4（handler 优先级为默认 0，被上层 `stop_event()` 连带截断）。
+- 已知坑：`selftest.py` 在工具目录裸跑必定失败（卡表不在该目录，会联网重下 10MB，且不打印子进程 stderr），需先把卡表软链进一个空目录再执行。详见 `HANDOFF-fishbox.md` 第 5 节。
+
+---
+
+## 5. astrbot_plugin_qq_proactive（当前闲置）
+
+按人设在活跃时段主动给绑定会话发消息，模型可输出 `PASS` 否决本轮。
+
+| 配置项 | 实测值 |
+|:---|:---|
+| `ENABLE` | **false**（schema 默认 true，被运行时配置关掉） |
+| `API_KEY` / `TARGET_UMO` | 空（未配 Key、未绑定） |
+| `API_BASE` / `MODEL` | `https://api.openai.com/v1` / `gpt-4o-mini` |
+| `ACTIVE_START` / `ACTIVE_END` | 09:00 / 23:00，支持跨午夜（`main.py:107-114`） |
+| `MIN` / `MAX_INTERVAL_MINUTES` | 90 / 240（轮询随机等待） |
+| `DAILY_LIMIT` | 3 |
+
+- 模型调用**不走 AstrBot provider**，插件自带 `AsyncOpenAI` 直连（`main.py:146-184`）。
+- 调度是纯 asyncio 循环（`initialize` 起 `:76`，`terminate` 正确 cancel 并落盘 `:78-87`），不是 cron。
+- 状态文件 `data/plugin_data/astrbot_plugin_qq_proactive/state.json`，**实测不存在**，即从未成功发出过。
+- 命令 `/proactive 绑定|解绑|状态|开|关|测试`，全部 ADMIN 权限（历史上曾无权限校验，见 `main.py.bak-adminfix`）。
+- 启用前置：填 `API_KEY` → 在目标会话执行 `/proactive 绑定` → `ENABLE=true` → 重载插件。
+
+---
+
+## 6. 当前配置组合的实际生效状态（重点）
+
+运行时实值（2026-11-02 17:41 上线版）：`QQ_MODE=tieba`、`QQ_GROUP_GUEST_WILLING=40`、`QQ_GROUP_OWNER_WILLING=60`、`QQ_ACTIVE_SCORE=30`、`QQ_QUIET_HOURS=00:50-07:30`、限流 10 条/分 + 冷却 180 秒、`QQ_NEED_AT=False`、`QQ_GROUP_MUTE` 未落盘、`QQ_PRIVATE_CONTACT_GATE=False`（新增，默认关）、群级覆盖与联系人名单均为空。**空覆盖 + 关闸门 = 与上线前行为完全一致**；唯一的语义新增是静音群里「主人@」可豁免（当前无群静音，不触发）。
+
+| 现象 | 原因 | 证据 |
+|:---|:---|:---|
+| **主人侧价值闸门当前不生效**：`QQ_ACTIVE_SCORE=30` 与 `QQ_GROUP_OWNER_WILLING=60` 实际不起作用 | `QQ_MODE=tieba`，而 `modes/qq/tieba.json` 的 `owner_gate=false` → `_mode_owner_gate_enabled()` 返回 False → `main.py:1030` 提前 return | 日志计数 `群主人意愿闸门静默=0`、`主人消息闸门静默=0` |
+| **群友闸门正常工作** | 群友分支前置且与模式无关（`main.py:1001-1027`），门槛现为 100−40=60 分 | 日志计数 `群友意愿闸门静默=125`（上线前累计），例 `14:14:49 … 50分：个人配件偏好，可接但非必答` |
+| **群里不 @ 的消息即便评分通过也不会被回答**，但评分仍逐条调模型 | 第 6 步需 `is_at_or_wake_command`；`wake_prefix=["/"]` + `QQ_NEED_AT=False` | `waking_check/stage.py:106,133,142`；上述 125 条静默记录即由此产生 |
+| 限流实际触发过 6 次；`mute gate` 命中 197 次；LLM 终极否决 150 次 | 面板/命令曾武装 `qq_mute`；`~/.config/fatfish-sentinel/` 当前**无** `qq_mute`/`bili_mute` 文件，故熔断处于放行态 | `journalctl`/`astrbot.log` 计数（均为 15:10 前累计，重启后计数窗口重置） |
+| 陌生人 QQ 私聊当前**全部会被回复** | 历史上私聊从无闸门；新 `QQ_PRIVATE_CONTACT_GATE` 默认关。开启后仅主人与 `/qq联系人` 名单可被回复 | `main.py:1247-1260`、`2612-2622` |
+
+注：静音群的「主人@豁免」判定用的是 `is_admin() and is_at_or_wake_command`，**与 `QQ_MODE` 无关**——tieba 模式下主人闸门虽短路，静音群豁免依然有效。
+
+日志命中计数（`/home/ubuntu/AstrBot/data/logs/astrbot.log`，采样 2026-11-02 15:10 CST）：`群友意愿闸门静默=125`、`LLM veto=150`、`mute gate=197`、`限流触发=6`、`群主人意愿闸门静默=0`、`主人消息闸门静默=0`、`stale QQ message=0`。
+
+一句话结论：**真正在起作用的仍是「群友意愿 40」+「静默时段」+「限流」三项**；主人侧两项被模式文件短路；新增的群级覆盖与私聊闸门全部处于默认位（零覆盖、闸门关），显式配置后才改变行为。
+
+---
+
+## 7. 已知隐患清单（仅记录，本轮未修改任何一项）
+
+### 7.1 决策链与成本
+
+| # | 隐患 | 证据 |
+|:---|:---|:---|
+| 1 | **评分失败=全量放行且无告警级日志**。群与私聊双 fail-open，叠加熔断「打开即返回 None」，模型端点抖动或配额耗尽期间，群友与群主人闸门整体退化为「全部回答」；fail-open 日志是 `logger.debug` | `reply.py:200-202`、`reply.py:149-151`、`llm.py:244-248` |
+| 2 | **对根本不可回复的消息白烧评分 token**。群友分支不检查 `is_at_or_wake_command`，而当前配置下未被 @ 的群消息根本不会触发默认 LLM——评不评分都不会回。当前值 40 处于「每条都调一次模型」状态 | `main.py:1006-1013` 对照 `process_stage/stage.py:66-70` |
+| 3 | **限流是全进程共享而非分群**。`_qq_rate_marks` 是单一列表，键不含 `gid`；任一活跃群打满 10 条/分，会让其他所有群同时进入 180 秒全静默 | `main.py:1198-1209` |
+| 4 | **`priority=9999` 熔断闸门不区分平台**，事件类型 `ALL` 且未排除 webchat；`qq_mute` 一旦武装会连带停掉 WebUI 会话。与本文件其它闸门处处排除 webchat（`1157-1158`、`1028-1029`、`2320`）的写法不一致 | `main.py:556-565` |
+| 5 | **去重窗口语义是「放行」而非「沿用结论」**：命中缓存直接 return（=回），5 秒内连发的后续消息一律免检——刷屏连发反而比单条更容易得到回复。缓存 `_owner_gate_last` 与 `_qq_ctx_buf` **均无淘汰逻辑**，群数增长时驻留内存不回收 | `main.py:1013-1014`、`1051-1052`、`1047-1054`、`1090-1095` |
+| 6 | **评分调用在事件链上同步 await 且无超时包装**。慢模型会把整条消息管线阻塞到该请求返回（对照知识库检索自带 4 秒超时 `_KB_TIMEOUT_SECONDS`） | `reply.py:141`、`reply.py:192` 对照 `reply.py:318-320` |
+| 7 | **群消息原文直入评分提示词，无隔离前缀**。群成员可用「请给这条消息 100 分」一类文本抬高价值分，绕过 3.3 的锚点设计。影响面限于「让机器人开口」，不构成信息泄露 | `reply.py:190`（`content[:800]`）、`main.py:1007` |
+| 8 | **LLM 终极否决不覆盖全部闸门层**。二次拦截检查静音 / 静默 / 要@（三项均已含群级覆盖决议）与私聊闸门，**不含限流与价值评分**——这两层的任何漏洞（如 fail-open）没有第二道防线 | `main.py:2586-2624` |
+| 9 | **`QQ_GROUP_MUTE` 无 schema 声明**，管理面板不可见、无校验、迁移易漏；同类未声明项还有 `QQ_SEND_*`、`QQ_STALE_MAX_AGE_SEC`、`OWNER_GATE_DEDUP_SEC`（源码常量，改一次要重启） | `_conf_schema.json` 内 grep 无匹配 |
+
+### 7.2 跨插件连带影响
+
+| # | 隐患 | 证据 |
+|:---|:---|:---|
+| 10 | **monkeypatch 影响全进程 QQ 出站**：同机另两个插件的发送同样被 5~12 秒强制间隔、120 秒队列上限与 `qq_mute` 拦截 | `main.py:62-110`、`:83-85`、`:88-93` |
+| 11 | **优先级抢占与连带截断**：本插件占用 9999/850/70/65/60，而 `astrbot_plugin_qq_proactive`（`main.py:228`）与 `astrbot_plugin_fishbox`（`main.py:149`）**均未声明 priority（默认 0）**，排在全部闸门之后；任一闸门 `stop_event()` 会让它们整批不执行。即静默时段或 `/qq群聊 关` 生效期间，那两个插件的监听逻辑同时失效 | `star_request.py:40-41` |
+
+### 7.3 架构、安全与运维
+
+| # | 隐患 | 证据 | 建议 |
+|:---|:---|:---|:---|
+| 12 | 版本声明滞后：`metadata.yaml` 1.6.1，CHANGELOG 已到 v1.7.0 | `metadata.yaml:4`、CHANGELOG 首条 | WebUI 显示与「从原仓库更新」判定都依赖它，随下次落地一起 bump |
+| 13 | 同步文件 IO 混在 async 主循环：`_load_json/_save_json` 含 `fsync`，而 `memory.json` 已 2.69MB | `utils.py:65-114`；调用点 `main.py:396,409,411,433`、`consolidation.py:383,454` | 大文件读写移入 `asyncio.to_thread`（SQLite 侧已是这种写法） |
+| 14 | `except Exception:` 后紧跟 pass/continue 共 **79 处**，异常被吞且不记日志 | `share.py` 12、`main.py` 9、`video.py` 8、`bangumi.py` 7、`utils.py` 7、`webui_bridge.py` 5 等 | 至少补 debug 级日志，否则排障只能靠猜 |
+| 15 | 凭据明文且权限偏松：SESSDATA 等真值所在配置文件为 **664** | `data/config/astrbot_plugin_bilibili_ai_bot_config.json` | `chmod 600`，与 `affection.json` 的 0600 对齐 |
+| 16 | 面板路由 `POST /config` **可写敏感键**，鉴权完全依赖宿主 AstrBot；而 6185 监听 `0.0.0.0` | `webui_bridge.py:127`；`ss -ltnp` | 确认 WebUI 强口令；云防火墙只放行 22/80/8765 是当前唯一外部屏障，**勿放开 6185** |
+| 17 | `/proactive 测试` 的 force 分支跳过时段/上限/间隔检查，可绕过每日上限，与 README「计入配额」表述不符 | `astrbot_plugin_qq_proactive/main.py:205-211` | 与文档对齐，或给 force 单独加次数限制 |
+| 18 | 插件目录 33MB 里约 28MB 是可清理物：字体 15054748 B、`.git/objects` 约 12MB、`core/__pycache__` 1.5MB、多个 `.bak` 与 `pytest-of-*` / `bilibot-test-*` 残留 | `du` 实测 | `.git` 需保留（供上游更新）；`__pycache__` 与测试残留可清 |
+| 19 | **「主人」判定口径三套并存**：bilibili 用 `OWNER_MID` + AstrBot `admins_id`；`astrbot_plugin_fishbox` 已于 0.2.0 统一走 `event.is_admin()`（硬编码号已删）；qq_proactive 用 AstrBot ADMIN。且 `is_admin()` 与 QQ 群职务无关，易被误解为群管 | 各插件 `main.py` | 统一走 `event.is_admin()`，或至少在本文记明差异 |
+| 20 | QQ 侧回复与装死判定**无任何命令可回看**，只能登服务器 grep；`security_log.json` 虽存在但 QQ 闸门链路不写它 | `main.py:2009-2037` | 若要长期调旋钮，需把判定落一张环形日志表或复用 `reply_log.json` |
+
+---
+
+## 8. 待复核项（勿当已确认结论）
+
+1. bilibili 插件 `.git` 与上游是否仍有本地偏离未核对（大量 `.bak` 与手工补丁脚本痕迹，见 `/home/ubuntu/patch_*.py`）。
+2. `/home/ubuntu/*.py` 七个散落脚本（`grab.py`、`patch_gate.py`、`patch_veto.py`、`patch_comment.py`、`set_mute.py`、`update_prefs.py`、`inspect_fu.py`）均为 bilibili 插件的一次性调试/调参遗留物，无 cron 引用；`grab.py` + `deploy.sh` 属历史迁移通道，是否废弃待确认后归档。
+3. 日志命中计数为一次性 `grep -c` 快照，只反映该 log 文件当前窗口，不能当长期基线；引用时须重新采样。
+
+---
+
+## 9. 与其它文档的分工
+
+| 文档 | 负责的内容 |
+|:---|:---|
+| `SERVER.md` | 硬件、系统、磁盘内存、权限边界、目录地图、备份策略、安全待办 |
+| `SERVICES.md` | 每个服务干什么、怎么起、配置日志位置、端口表、常用操作 |
+| `PLUGINS.md`（本文） | 插件功能清单、消息处理决策链、旋钮与生效状态、模块与数据架构、隐患清单 |
+| `HANDOFF-fishbox.md` | 鱼箱与卡组解析的改动交接、待办、坑位 |
+| `接入须知.md` | 接手该服的操作流程、权限与红线、验收自检 |
+
+同一条事实只在一处维护。历史上「sudo 不可用」这个错误结论曾在四份文档里同时存在并互相引证，导致接手者白绕一大圈（已于 2026-11-02 全部更正）。新增事实请落到上表对应的那一份，其它文档只写指针。
+
+## 更新记录
+
+- 2026-11-02 初版：三插件功能矩阵、QQ 决策链与旋钮全集（含运行时实值与生效状态）、模块与数据架构、命令总表、20 条隐患。
+- 2026-11-02：`astrbot_plugin_fishbox` 升到 `0.2.0`——面板配置接上生效、截断拆为卡组与工具两个键、删除写死的管理员 QQ 号默认值。
+- 2026-11-02 17:41：bilibili 插件上线「群聊/联系人管理」（`main.py` 2414→2702 行，命令 51→58）：群级要@/静音/意愿覆盖（`group_prefs.json`，静音群仅主人@豁免）、私聊联系人名单（`contacts.json`）与陌生人私信闸门 `QQ_PRIVATE_CONTACT_GATE`（默认关，schema 已声明）。全部默认位=行为零变化。改动前备份 `*.bak-20261102-groups`，已重启生效。

@@ -1,0 +1,10 @@
+name: astrbot_plugin_fishbox
+display_name: 鱼箱桥接
+desc: 把本地工具沙箱接到机器人：群里按需调用独立进程里的工具，主干零改动
+version: 0.2.0
+author: dashi-whale
+repo: ""
+tags:
+  - 工具
+  - 沙箱
+  - 本地执行

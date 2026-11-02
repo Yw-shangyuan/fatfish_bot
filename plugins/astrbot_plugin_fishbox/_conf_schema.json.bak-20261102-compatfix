@@ -1,0 +1,22 @@
+{
+  "enable": {
+    "type": "bool",
+    "description": "总开关：关掉后插件不注册任何工具，等同不存在",
+    "default": true
+  },
+  "fishbox_home": {
+    "type": "string",
+    "description": "fishbox 安装目录（内含 client.py / server.py / tools）",
+    "default": "/home/ubuntu/fishbox"
+  },
+  "socket_path": {
+    "type": "string",
+    "description": "server.py 监听的 unix socket 路径，留空则用目录下 fishbox.sock",
+    "default": ""
+  },
+  "max_output": {
+    "type": "int",
+    "description": "单次调用回给模型的最大字符数，超出截断",
+    "default": 2000
+  }
+}
