@@ -61,13 +61,13 @@ astrbot.service（systemd，Restart=always/5s，WorkingDirectory=/home/ubuntu/As
 
 | 插件 | 声明版本 | 代码量 | 注册命令 | 运行态 |
 |:---|:---|:---|:---|:---|
-| `astrbot_plugin_bilibili_ai_bot` | metadata `1.6.1`（CHANGELOG 最新条目 `v1.7.0` 2026-10-30；**功能已远超此声明**，见 §7.3 #12） | Python 37275 行（含 tests 约 9000 行不参与运行）；`core/` 40+ 模块 | 58 | 启用，功能主体 |
+| `astrbot_plugin_bilibili_ai_bot` | metadata `1.8.0`（与 CHANGELOG 最新条目 `v1.8.0` 对齐，2026-11-02；1.6.1–1.7.x 错位始末见 §7.3 #12） | Python 37275 行（含 tests 约 9000 行不参与运行）；`core/` 40+ 模块 | 58 | 启用，功能主体 |
 | `astrbot_plugin_fishbox` | `0.2.0` | main.py 280 行 | 2 | 启用 |
 | `astrbot_plugin_qq_proactive` | `1.0.0` | main.py 333 行 | 1 | **`ENABLE=false`，实际闲置** |
 
 命令数按 `@filter.command` 注册字面量去重统计。上游仓库：bilibili 插件 `https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot`（本机为 git clone 安装，目录内含 `.git`）；另两个为本机自研，`repo` 字段为空，WebUI 以 `author/name` 兜底显示。
 
-人工维护用的工作副本在本地 `D:\AIagent\napcat\remote\`：`plugin_main_work.py` 与服务器上 bilibili 插件 `main.py` 逐字节一致（2026-11-02 17:41 版，MD5 `c77ff02ec60ce5d55ee37dfc8cbdb6fa`），另有 `core_reply_work.py`、`_conf_schema_work.json`、`README_work.md`、`CHANGELOG_work.md` 同插件副本。
+人工维护用的工作副本在本地 `D:\AIagent\napcat\remote\`：`plugin_main_work.py` 与服务器上 bilibili 插件 `main.py` 逐字节一致（2026-11-02 版本号对齐后，MD5 `fcf4906f22b497864375b680cbadfc98`），另有 `core_reply_work.py`、`_conf_schema_work.json`、`README_work.md`、`CHANGELOG_work.md` 同插件副本。
 
 ---
 
@@ -354,7 +354,7 @@ class BiliBiliBot(Star, +19 Mixin)                 main.py:123
 
 | # | 隐患 | 证据 | 建议 |
 |:---|:---|:---|:---|
-| 12 | 版本声明滞后：`metadata.yaml` 1.6.1，CHANGELOG 已到 v1.7.0 | `metadata.yaml:4`、CHANGELOG 首条 | WebUI 显示与「从原仓库更新」判定都依赖它，随下次落地一起 bump |
+| 12 | ~~版本声明滞后~~ **2026-11-02 已了结**：`metadata.yaml` 与 `main.py`（头部 docstring、`register` 实参、状态面板文案）共四处 1.6.1 一并 bump 至 1.8.0，与 CHANGELOG `v1.8.0` 条目对齐 | `metadata.yaml:4`、`main.py:2/129/712` | 教训：展示性版本号随落地即 bump，别让它游荡超过一个功能周期 |
 | 13 | 同步文件 IO 混在 async 主循环：`_load_json/_save_json` 含 `fsync`，而 `memory.json` 已 2.69MB | `utils.py:65-114`；调用点 `main.py:396,409,411,433`、`consolidation.py:383,454` | 大文件读写移入 `asyncio.to_thread`（SQLite 侧已是这种写法） |
 | 14 | `except Exception:` 后紧跟 pass/continue 共 **79 处**，异常被吞且不记日志 | `share.py` 12、`main.py` 9、`video.py` 8、`bangumi.py` 7、`utils.py` 7、`webui_bridge.py` 5 等 | 至少补 debug 级日志，否则排障只能靠猜 |
 | 15 | 凭据明文且权限偏松：SESSDATA 等真值所在配置文件为 **664** | `data/config/astrbot_plugin_bilibili_ai_bot_config.json` | `chmod 600`，与 `affection.json` 的 0600 对齐 |
@@ -391,3 +391,4 @@ class BiliBiliBot(Star, +19 Mixin)                 main.py:123
 - 2026-11-02 初版：三插件功能矩阵、QQ 决策链与旋钮全集（含运行时实值与生效状态）、模块与数据架构、命令总表、20 条隐患。
 - 2026-11-02：`astrbot_plugin_fishbox` 升到 `0.2.0`——面板配置接上生效、截断拆为卡组与工具两个键、删除写死的管理员 QQ 号默认值。
 - 2026-11-02 17:41：bilibili 插件上线「群聊/联系人管理」（`main.py` 2414→2702 行，命令 51→58）：群级要@/静音/意愿覆盖（`group_prefs.json`，静音群仅主人@豁免）、私聊联系人名单（`contacts.json`）与陌生人私信闸门 `QQ_PRIVATE_CONTACT_GATE`（默认关，schema 已声明）。全部默认位=行为零变化。改动前备份 `*.bak-20261102-groups`，已重启生效。
+- 2026-11-02 19:46：版本对齐——`metadata.yaml` 与 `main.py` 头部/注册/状态面板共四处 1.6.1 → 1.8.0，与 CHANGELOG `v1.8.0` 条目一致，#12 隐患了结；备份 `*.bak-20261102-ver`，astrbot 已重启生效。
