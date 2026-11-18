@@ -56,6 +56,65 @@ BILI_MUTE_FILE = os.path.join(MUTE_DIR, "bili_mute")
 GROUP_PREFS_FILE = os.path.join(DATA_DIR, "group_prefs.json")
 CONTACTS_FILE = os.path.join(DATA_DIR, "contacts.json")
 
+
+def _core_cfg(plugin, event):
+    """该会话实际生效的主程序配置对象（与流水线共享同一实例，改完即生效）。"""
+    try:
+        cfg = plugin.context.get_config(umo=event.unified_msg_origin)
+    except Exception:
+        try:
+            cfg = plugin.context.get_config()
+        except Exception:
+            return None
+    return cfg if isinstance(cfg, dict) else None
+
+
+def _private_umos(ps):
+    """主程序白名单里的私聊条目（排除 webchat）：{QQ号: 原始条目}。"""
+    out = {}
+    for item in ((ps or {}).get("id_whitelist") or []):
+        s = str(item).strip()
+        if not s or s.startswith("webchat:") or ":FriendMessage:" not in s:
+            continue
+        uid = s.rsplit(":", 1)[-1].strip()
+        if uid:
+            out[uid] = s
+    return out
+
+
+def _group_ids_in_wl(ps):
+    out = set()
+    for item in ((ps or {}).get("id_whitelist") or []):
+        s = str(item).strip()
+        if s.isdigit():
+            out.add(s)
+        elif ":GroupMessage:" in s:
+            out.add(s.rsplit(":", 1)[-1])
+    return out
+
+
+def _is_group_event(event):
+    """是否群聊事件：按消息类型判定，不再依赖 group_id 是否非空。"""
+    try:
+        return str(getattr(event.get_message_type(), "name", "") or "") == "GROUP_MESSAGE"
+    except Exception:
+        try:
+            return bool(event.get_group_id())
+        except Exception:
+            return False
+
+
+def _core_gate_state(plugin, event):
+    cfg = _core_cfg(plugin, event)
+    ps = (cfg or {}).get("platform_settings") or {}
+    if not ps.get("enable_id_white_list"):
+        return "主程序白名单：未启用（当前任何消息都不拦截）"
+    deny = "开" if ps.get("id_whitelist_deny_when_empty") else "关"
+    return (
+        f"主程序白名单：开 · 私聊 {len(_private_umos(ps))} 人 · "
+        f"群 {len(_group_ids_in_wl(ps))} 个 · 空名单即全拒 {deny}"
+    )
+
 # ---- QQ 群图档案 + 意图嗅探附图（v1.9.0）----
 # 群消息里的图片在 capture 钩子（priority=70）落盘存档：纯磁盘操作、零 LLM 成本。
 # 无图消息命中指图信号词时，把"上次对外发言之后"本群出现过的图片像素在
@@ -1425,7 +1484,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             pass
         is_group = False
         try:
-            is_group = bool(event.get_group_id())
+            is_group = _is_group_event(event)
         except Exception:
             pass
         if is_group:
@@ -1445,22 +1504,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             if bool(self._qq_group_pref(gid, "need_at", self.config.get("QQ_NEED_AT", False))) and not event.is_at_or_wake_command:
                 event.stop_event()
                 return
-        elif bool(self.config.get("QQ_PRIVATE_CONTACT_GATE", False)):
-            # 私聊闸门：开启后仅管理员（主人）与 contacts 名单内的 QQ 号可被回复。
-            try:
-                allowed = bool(event.is_admin())
-            except Exception:
-                allowed = False
-            if not allowed:
-                try:
-                    uid = str(event.get_sender_id() or "")
-                except Exception:
-                    uid = ""
-                allowed = bool(uid) and uid in (self._load_json(CONTACTS_FILE, {}) or {})
-            if not allowed:
-                logger.info("[BiliBot] 私聊闸门静默（非主人且不在联系人名单）")
-                event.stop_event()
-                return
+        # 私聊准入统一由主程序访问控制在流水线前置阶段拦截（不产生模型调用），
+        # 此处不再维护第二份名单。
         per_min = int(self.config.get("QQ_RATE_PER_MIN", 0) or 0)
         if per_min > 0:
             now = time.time()
@@ -1497,7 +1542,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             f"群聊群友意愿：{int(self.config.get('QQ_GROUP_GUEST_WILLING', 100) or 0)}/100（100=都回，低于100低价值群友闲聊装死且零花费；改法：/qq群友意愿 60）",
             f"群判定上下文：上限 {int(self.config.get('QQ_GROUP_OWNER_CTX', 5) or 0)} 条（默认带最近3条，5秒内连发的会全部压进上下文；改法：/qq上下文 5）",
             f"群级覆盖：{len(self._load_json(GROUP_PREFS_FILE, {}) or {})} 个群有专属设置（/qq群 列表；单群：/qq群@ /qq群静音 /qq群意愿）",
-            f"私聊闸门：{'✅ 开（仅主人与联系人可被回复）' if self.config.get('QQ_PRIVATE_CONTACT_GATE', False) else '关'}（联系人 {len(self._load_json(CONTACTS_FILE, {}) or {})} 人；改法：/qq私信闸 开/关，名单：/qq联系人）",
+            f"私聊闸门：{_core_gate_state(self, event)}（/qq联系人 管理）",
             f"当前 QQ 模式：{self.config.get('QQ_MODE', 'normal')}（改法：/qq模式）",
             "注：静默与要@只限制群聊，私聊永远理主人；/ 开头命令永远放行。",
         ]
@@ -1803,6 +1848,93 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("qq联系人")
     async def cmd_qq_contacts(self, event: AstrMessageEvent):
+        """QQ 私聊白名单：查看 / +QQ号 [备注] / -QQ号。真相唯一：主程序访问控制白名单。"""
+        toks = event.message_str.strip().split()
+        cfg = _core_cfg(self, event)
+        if cfg is None:
+            yield event.plain_result("暂时读不到主程序配置，请稍后再试")
+            return
+        ps = cfg.setdefault("platform_settings", {})
+        notes = dict(self._load_json(CONTACTS_FILE, {}) or {})
+        priv = _private_umos(ps)
+        if len(toks) < 2:
+            admins = {
+                str(x).strip() for x in (cfg.get("admins_id") or []) if str(x).strip()
+            }
+            lines = [f"📒 QQ 私聊白名单（{len(priv)} 人）", _core_gate_state(self, event)]
+            for uid in sorted(priv):
+                note = str((notes.get(uid) or {}).get("note", "") or "")
+                tail = ("　" + note if note else "") + ("　（主人）" if uid in admins else "")
+                lines.append(f"  {uid}{tail}")
+            if not priv:
+                lines.append("  （空）加人：/qq联系人 +QQ号 [备注]")
+            lines.append("注：名单即 WebUI 访问控制白名单，改完即时生效；主人在 admins_id 内天然可回。")
+            yield event.plain_result("\n".join(lines))
+            return
+        arg = toks[1].strip()
+        if arg.startswith("+"):
+            uid = arg[1:].strip()
+            if not uid.isdigit():
+                yield event.plain_result("QQ号得是数字：/qq联系人 +123456 [备注]")
+                return
+            note = " ".join(toks[2:])[:30] if len(toks) > 2 else ""
+            plat = str(event.unified_msg_origin).split(":")[0].strip() or "napcat-qq"
+            entry = f"{plat}:FriendMessage:{uid}"
+            wl = [str(x).strip() for x in (ps.get("id_whitelist") or []) if str(x).strip()]
+            if entry in wl:
+                yield event.plain_result(f"ℹ️ {uid} 已在私聊白名单里")
+                return
+            wl.append(entry)
+            ps["id_whitelist"] = wl
+            if note:
+                notes[uid] = {"note": note}
+                self._save_json(CONTACTS_FILE, notes)
+            try:
+                cfg.save_config()
+            except Exception as exc:
+                ps["id_whitelist"] = [x for x in wl if x != entry]
+                yield event.plain_result(f"❌ 写入主配置失败，未生效：{exc}")
+                return
+            if not ps.get("enable_id_white_list"):
+                yield event.plain_result(
+                    f"⚠️ 已记录 {uid}，但主程序白名单总开关未启用，当前不产生拦截效果。"
+                )
+                return
+            yield event.plain_result(
+                f"✅ 已把 {uid} 加入私聊白名单（现共 {len(_private_umos(ps))} 人，即时生效）"
+            )
+            return
+        if arg.startswith("-"):
+            uid = arg[1:].strip()
+            wl = [str(x).strip() for x in (ps.get("id_whitelist") or []) if str(x).strip()]
+            kept = [
+                x
+                for x in wl
+                if not (
+                    x.endswith(":FriendMessage:" + uid)
+                    and not x.startswith("webchat:")
+                )
+            ]
+            if len(kept) == len(wl):
+                yield event.plain_result(f"{uid} 不在私聊白名单里")
+                return
+            ps["id_whitelist"] = kept
+            try:
+                cfg.save_config()
+            except Exception as exc:
+                ps["id_whitelist"] = wl
+                yield event.plain_result(f"❌ 写入主配置失败，未生效：{exc}")
+                return
+            yield event.plain_result(
+                f"✅ 已移除 {uid}，其私聊恢复陌生人待遇（剩 {len(_private_umos(ps))} 人）"
+            )
+            return
+        yield event.plain_result(
+            "用法：/qq联系人 查看 · /qq联系人 +QQ号 [备注] · /qq联系人 -QQ号"
+        )
+        return
+
+    async def _legacy_qq_contacts(self, event: AstrMessageEvent):
         """私聊联系人名单：/qq联系人 查看 · +QQ号 [备注] 添加 · -QQ号 删除。"""
         toks = event.message_str.strip().split()
         contacts = dict(self._load_json(CONTACTS_FILE, {}) or {})
@@ -1842,6 +1974,20 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("qq私信闸")
     async def cmd_qq_private_gate(self, event: AstrMessageEvent):
+        """私聊准入状态汇报：判定已统一由主程序访问控制承担。"""
+        cfg = _core_cfg(self, event)
+        if cfg is None:
+            yield event.plain_result("暂时读不到主程序配置，请稍后再试")
+            return
+        yield event.plain_result(
+            f"{_core_gate_state(self, event)}\n"
+            "私聊准入已上移到主程序白名单阶段：不在名单 = 不触发任何模型调用。\n"
+            "增删联系人：/qq联系人 +QQ号 [备注] · /qq联系人 -QQ号\n"
+            "（插件级旧开关已停用，不再维护第二份名单）"
+        )
+        return
+
+    async def _legacy_qq_private_gate(self, event: AstrMessageEvent):
         """陌生人私聊闸门：/qq私信闸 开|关。开=仅主人与联系人名单的私聊会被回复。"""
         toks = event.message_str.strip().split()
         cur = bool(self.config.get("QQ_PRIVATE_CONTACT_GATE", False))
@@ -2792,7 +2938,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         # 入口闸的 stop_event 可能被未知路径绕过，这里在 LLM 调用点前再拦一次。
         # 命令消息以唤醒词 "/" 开头，is_at_or_wake_command 为 True，不受影响。
         try:
-            if event.get_group_id() and event.get_platform_name() != "webchat":
+            if _is_group_event(event) and event.get_platform_name() != "webchat":
                 _v_gid = str(event.get_group_id() or "")
                 if bool(self._qq_group_pref(_v_gid, "mute", self.config.get("QQ_GROUP_MUTE", False))) and not (
                     event.is_admin() and event.is_at_or_wake_command
@@ -2811,17 +2957,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                     )
                     event.stop_event()
                     return
-            elif (
-                event.get_platform_name() != "webchat"
-                and bool(self.config.get("QQ_PRIVATE_CONTACT_GATE", False))
-            ):
-                if not (
-                    bool(event.is_admin())
-                    or str(event.get_sender_id() or "") in (self._load_json(CONTACTS_FILE, {}) or {})
-                ):
-                    logger.info("[BiliBot] LLM veto: private msg from non-contact")
-                    event.stop_event()
-                    return
+            # 私聊准入已上移到主程序白名单阶段，这里只保留群聊 need_at 判定。
         except Exception:
             pass
         try:

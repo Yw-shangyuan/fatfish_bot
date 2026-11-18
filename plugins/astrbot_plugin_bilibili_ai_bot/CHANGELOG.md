@@ -1,3 +1,12 @@
+﻿## 未发布 (2026-11-18)
+
+- **语义统一：QQ 私聊白名单只保留一份真相。** `/qq联系人` 改为直接读写 AstrBot 主程序的访问控制白名单（`platform_settings.id_whitelist` 中的 `<平台>:FriendMessage:<QQ号>` 条目），增删即时生效，插件不再维护第二份名单。
+- 插件级私聊闸门停用：`on_qq_safety_gate` 与 `inject_bili_memory` 中依赖 `QQ_PRIVATE_CONTACT_GATE` 的两处判定已移除。QQ 私聊准入统一在主程序 `WhitelistCheckStage` 完成，位于 LLM 调用之前，名单外的私聊不产生任何模型调用。
+- `contacts.json` 降级为纯备注表：仅保存 `/qq联系人 +QQ号 备注` 的 note 字段，不再参与任何判定。
+- `/qq私信闸` 改为只读状态汇报（主开关 / 私聊人数 / 群数 / 空名单策略），不再切换开关。
+- B站私信范围不变：`PRIVATE_MESSAGE_REPLY_SCOPE=owner` 仍然只回复主人。
+- 修复 aiocqhttp 侧分类与路由缺陷：加好友申请等无群号的请求/通知事件不再被标记为私聊（不再产生无法匹配的幽灵 UMO）；出站发送改按消息类型判定目标，私聊事件即使携带群号也不会群发。
+
 ## v1.9.1 (2026-11-03)
 
 - 修复 v1.9.0 存档落盘空转：core 契约里 `Image.convert_to_base64()` 返回值不带 `base64://` 前缀（components.py docstring），而存档判断误用 `startswith("base64://")`，像素下载成功却被静默丢弃、桶恒空。改为前缀/data URI/裸 base64 三形态兼容解码，落盘失败日志 debug 提级 warning。

@@ -1,4 +1,4 @@
-# astrbot_plugin_bilibili_ai_bot
+﻿# astrbot_plugin_bilibili_ai_bot
 
 B站 AI Bot 插件 for [AstrBot](https://github.com/AstrBotDevs/AstrBot) — 让你的 AI 角色在 B 站评论区”活”起来。
 
@@ -82,6 +82,10 @@ Bot 可在聊天中通过自然语言触发以下能力，工具结果回到 LLM
 - **视频直读多格式兼容** — 视频分析支持 Gemini / Qwen 两种接口格式，用户自选（v1.1.31 新增）
 
 ### 🛡️ QQ 风控与回复意愿
+
+> 注意：**私聊准入不在这里**。它统一由 AstrBot 访问控制白名单负责（见 `/qq联系人`），
+> 拦截发生在 LLM 调用之前；下面的静音/要@/意愿只作用于群聊。
+
 
 QQ 侧消息在触达大模型前逐层过闸，被拦截的消息零 token 花费（按执行顺序）：
 
@@ -305,6 +309,13 @@ git clone https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot
 > 💡 恶意告警功能需要同时配置 `ABUSE_ALERT_MODE` 和 `ABUSE_ALERT_QQ_UMO`。UMO 可从 AstrBot 日志或读空气插件的 UMO 注册表获取。告警时 Bot 会用人设口吻私信主人并询问是否拉黑，主人直接回复即可。
 
 ## 🎮 命令
+
+> **QQ 私聊白名单（语义统一后）**：`/qq联系人` 读写的就是 AstrBot 主程序的访问控制白名单
+> （`platform_settings.id_whitelist` 中的 `<平台>:FriendMessage:<QQ号>` 条目），
+> 用法 `/qq联系人 查看` · `/qq联系人 +QQ号 [备注]` · `/qq联系人 -QQ号`，改完即时生效、无需重启。
+> `/qq私信闸` 只汇报状态，插件不再维护第二份名单；`contacts.json` 仅保存备注。
+> B站私信范围由 `PRIVATE_MESSAGE_REPLY_SCOPE` 单独控制（默认仅主人）。
+
 
 |命令             |说明                     |
 |---------------|-----------------------|
