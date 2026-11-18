@@ -1,0 +1,13 @@
+[Unit]
+Description=FatFish QR login portal (token-gated)
+After=docker.service
+Wants=docker.service
+
+[Service]
+User=ubuntu
+ExecStart=/usr/bin/python3 /home/ubuntu/ops/qr_portal.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

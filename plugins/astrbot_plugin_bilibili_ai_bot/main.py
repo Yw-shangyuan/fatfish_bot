@@ -1,10 +1,11 @@
 """
-AstrBot Plugin - Bilibili Bot 1.8.0
+AstrBot Plugin - Bilibili Bot 1.9.1
 自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布。
 拆分版本：核心逻辑分布在 core/ 下的 Mixin 模块中。
 """
 import sys
 import io, os, time, json, asyncio, random, traceback, sqlite3
+import base64, hashlib, re
 from datetime import datetime
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -54,6 +55,19 @@ BILI_MUTE_FILE = os.path.join(MUTE_DIR, "bili_mute")
 # contacts.json：{QQ号: {"note": str}}，私聊闸门白名单，仅影响私聊。
 GROUP_PREFS_FILE = os.path.join(DATA_DIR, "group_prefs.json")
 CONTACTS_FILE = os.path.join(DATA_DIR, "contacts.json")
+
+# ---- QQ 群图档案 + 意图嗅探附图（v1.9.0）----
+# 群消息里的图片在 capture 钩子（priority=70）落盘存档：纯磁盘操作、零 LLM 成本。
+# 无图消息命中指图信号词时，把"上次对外发言之后"本群出现过的图片像素在
+# core 准备图片之前塞进 req.image_urls（on_llm_request 钩子先于
+# prepare_request_images 执行，见 internal.py），让模型看到真图而非 [Image] 墓碑。
+QQ_LAST_SPOKE_FILE = os.path.join(DATA_DIR, "qq_last_spoke.json")
+GROUP_IMAGES_DIR = os.path.join(DATA_DIR, "group_images")
+GROUP_IMG_INDEX_FILE = os.path.join(DATA_DIR, "group_image_index.json")
+QQ_IMG_SIGNAL_RE = re.compile(
+    r"(上图|上面的?图片?|上张图|这[张几些]?图片?|那[张几些]?图片?|这些图|那些图"
+    r"|刚才的?图|刚刚的?图|前一条?的?图|图片|照片|截图|表情包?|梗图|图里|图中)"
+)
 
 
 def _read_mute(path: str) -> float | None:
@@ -106,6 +120,26 @@ def install_qq_send_throttle() -> bool:
                 await orig(cls, *args, **kwargs)
             finally:
                 state["last"] = time.monotonic()
+            # 发送成功（异常会向上传播跳过这里）即更新该群"肥鱼上次说话"时间戳，
+            # 作为群图嗅探选图的窗口起点。
+            if _ACTIVE_BILIBOT is not None:
+                # 真实签名 (cls, bot=None, message_chain=None, event=None,
+                # is_group=..., session_id=...)，全部 kwarg 传入：群消息时
+                # session_id 即群号；event 键只是 raw_message 原始 dict，不可依赖。
+                spoke_gid = ""
+                if kwargs.get("is_group"):
+                    spoke_gid = str(kwargs.get("session_id") or "")
+                if not spoke_gid:
+                    for cand in (cls,) + tuple(args) + (kwargs.get("event"),):
+                        try:
+                            spoke_g = cand.get_group_id()
+                        except Exception:
+                            continue
+                        if spoke_g:
+                            spoke_gid = str(spoke_g)
+                            break
+                if spoke_gid:
+                    _ACTIVE_BILIBOT.note_qq_bot_spoke(spoke_gid)
 
     paced.__qq_send_paced__ = True
     AiocqhttpMessageEvent.send_message = classmethod(paced)
@@ -126,7 +160,7 @@ _astrbot_site_packages = os.path.join(os.path.expanduser("~"), ".astrbot", "data
 if os.path.isdir(_astrbot_site_packages) and _astrbot_site_packages not in sys.path:
     sys.path.insert(0, _astrbot_site_packages)
 
-@register("astrbot_plugin_bilibili_ai_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布、LLM工具调用","1.8.0","https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot")
+@register("astrbot_plugin_bilibili_ai_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布、LLM工具调用","1.9.1","https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot")
 class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, AffectionMixin, PersonalityMixin, BilibiliAPIMixin, BangumiMixin, WebSearchMixin, VideoMixin, ReplyMixin, ProactiveMixin, DynamicMixin, ScheduleMixin, WeeklySummaryMixin, ShareMixin, ModeMixin, PrivateMessageMixin, LiveDanmakuMixin):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -143,6 +177,12 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         self._login_qrcode_key = None
         self._first_poll = True
         self._replied_at = set(self._load_json(REPLIED_AT_FILE, []))
+        self._qq_last_spoke = {str(k): float(v) for k, v in (self._load_json(QQ_LAST_SPOKE_FILE, {}) or {}).items()}
+        self._qq_last_spoke_saved = {}
+        self._qq_img_idx = {}
+        for _gid, _rows in (self._load_json(GROUP_IMG_INDEX_FILE, {}) or {}).items():
+            if isinstance(_rows, list):
+                self._qq_img_idx[str(_gid)] = [e for e in _rows if isinstance(e, dict) and e.get("path")]
         self._affection = self._load_json(AFFECTION_FILE, {})
         owner_mid = str(self.config.get("OWNER_MID", "") or "").strip()
         if owner_mid:
@@ -709,7 +749,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         runtime_priorities = runtime_status.get("event_priorities", {})
         runtime_actions = runtime_status.get("action_states", {})
         lines = [
-            "📺 BiliBot 1.8.0 状态","━━━━━━━━━━━━",f"🍪 {info}",
+            "📺 BiliBot 1.9.1 状态","━━━━━━━━━━━━",f"🍪 {info}",
             f"{'🟢 运行中' if self._running else '🔴 未运行'}",
             f"🧠 记忆:{mc}条 | 💎永久:{pmc}条 | 👤档案:{pc}个",
             f"   📊 今日:{sum(1 for m in self._memory if m.get('level')=='today')} | 近期:{sum(1 for m in self._memory if m.get('level')=='recent')} | 长期:{sum(1 for m in self._memory if m.get('level')=='long_term')} | 老化:{sum(1 for m in self._memory if m.get('aged'))}",
@@ -1084,9 +1124,6 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             return
         if not gid:
             return
-        text = str(event.message_str or "").strip()
-        if not text:
-            return
         name = "群友"
         try:
             sender = getattr(event.message_obj, "sender", None)
@@ -1094,12 +1131,177 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                 name = str(sender.get("card") or sender.get("nickname") or name)[:20]
         except Exception:
             pass
+        # 群图存档触发点：先于文本判空，保证纯图消息也落盘（异步，不阻塞本钩子）。
+        if bool(self.config.get("QQ_GROUP_IMAGE_ARCHIVE", True)):
+            try:
+                img_comps = [c for c in (event.get_messages() or []) if isinstance(c, Image)]
+            except Exception:
+                img_comps = []
+            if img_comps:
+                asyncio.create_task(self._archive_qq_group_images(gid, img_comps, name))
+        text = str(event.message_str or "").strip()
+        if not text:
+            return
         buf = getattr(self, "_qq_ctx_buf", None)
         if buf is None:
             buf = self._qq_ctx_buf = {}
         entry = (time.time(), name, text[:120])
         seq = buf.get(gid)
         buf[gid] = (seq + [entry])[-10:] if seq else [entry]
+
+    def note_qq_bot_spoke(self, gid):
+        """记录肥鱼对该群最近一次对外发声的epoch（由节流发送层回调）。"""
+        now = time.time()
+        self._qq_last_spoke[str(gid)] = now
+        if now - self._qq_last_spoke_saved.get(str(gid), 0.0) >= 5.0:
+            self._qq_last_spoke_saved[str(gid)] = now
+            try:
+                self._save_json(QQ_LAST_SPOKE_FILE, self._qq_last_spoke)
+            except Exception:
+                pass
+
+    async def _archive_qq_group_images(self, gid, img_comps, sender_name):
+        """把群消息里的图片像素落盘并维护该群环形档案（纯磁盘，零 LLM 调用）。
+
+        Args:
+            gid: 群号。
+            img_comps: 消息中的 Image 组件列表。
+            sender_name: 发送人展示名，用于附图注记。
+        """
+        try:
+            max_cnt = max(10, int(self.config.get("QQ_GROUP_IMAGE_MAX_COUNT", 100) or 100))
+            ttl = max(1, int(self.config.get("QQ_GROUP_IMAGE_TTL_HOURS", 72) or 72)) * 3600
+            root = os.path.join(GROUP_IMAGES_DIR, str(gid))
+            bucket = self._qq_img_idx.setdefault(str(gid), [])
+            known = {e.get("md5") for e in bucket}
+            for comp in img_comps[:4]:
+                raw = None
+                for attempt in range(3):
+                    try:
+                        data = await asyncio.wait_for(comp.convert_to_base64(), timeout=10)
+                        # core 契约（components.py Image.convert_to_base64 docstring）：
+                        # 返回值不带 base64:// 前缀；带前缀或 data URI 的形态一并兼容。
+                        if data and isinstance(data, str):
+                            if data.startswith("base64://"):
+                                data = data[len("base64://"):]
+                            elif data.startswith("data:") and "," in data:
+                                data = data.split(",", 1)[1]
+                            raw = base64.b64decode(data)
+                            break
+                    except Exception:
+                        pass
+                    if attempt < 2:
+                        await asyncio.sleep(3)
+                if not raw or len(raw) < 512 or len(raw) > 8 * 1024 * 1024:
+                    logger.warning(f"[BiliBot] 群图存档失败(群{gid})：下载为空或尺寸越界")
+                    continue
+                digest = hashlib.md5(raw).hexdigest()[:16]
+                if digest in known:
+                    continue
+                if raw[:3] == b"\xff\xd8\xff":
+                    ext = ".jpg"
+                elif raw[:6] in (b"GIF87a", b"GIF89a"):
+                    ext = ".gif"
+                elif raw[8:12] == b"WEBP":
+                    ext = ".webp"
+                else:
+                    ext = ".png"
+                os.makedirs(root, exist_ok=True)
+                path = os.path.join(root, f"{digest}{ext}")
+                try:
+                    with open(path, "wb") as f:
+                        f.write(raw)
+                except OSError:
+                    continue
+                bucket.append({
+                    "ts": time.time(), "md5": digest, "path": path,
+                    "sender": sender_name[:20], "size": len(raw),
+                })
+                known.add(digest)
+            cutoff = time.time() - ttl
+            keep = [e for e in bucket if float(e.get("ts", 0)) >= cutoff][-max_cnt:]
+            if len(keep) < len(bucket):
+                for e in bucket:
+                    if e not in keep:
+                        try:
+                            os.remove(e["path"])
+                        except OSError:
+                            pass
+                self._qq_img_idx[str(gid)] = keep
+            self._save_json(GROUP_IMG_INDEX_FILE, self._qq_img_idx)
+        except Exception as exc:
+            logger.debug(f"[BiliBot] 群图存档异常(群{gid}): {exc}")
+
+    async def _maybe_attach_recent_group_images(self, event, req, gid):
+        """按需给本次 LLM 请求附群内近期图片（on_llm_request 阶段，先于 core 备图）。
+
+        路径1：本条消息含 Image 但请求没拿到图（事件抓取竞态/URL 当时为空）
+            -> 就地同步重拉一次，成功即附图并结束。
+        路径2：本条消息无图、文本命中 QQ_IMG_SIGNAL_RE 指图信号
+            -> 把"肥鱼上次对外发言之后"本群存档的图按时间序附图（封顶
+            QQ_IMAGE_AUTOATTACH_MAX），并注入说明块纠偏模型措辞。
+
+        Args:
+            event: 当前消息事件。
+            req: 即将交给 provider 的请求。
+            gid: 群号。
+        """
+        if not bool(self.config.get("QQ_IMAGE_AUTOATTACH", True)):
+            return
+        if req.image_urls is None:
+            req.image_urls = []
+        if req.image_urls:
+            return
+        comps = [c for c in (event.get_messages() or []) if isinstance(c, Image)]
+        if comps:
+            deadline = time.monotonic() + 12.0
+            for comp in comps[:3]:
+                remain = deadline - time.monotonic()
+                if remain <= 0.5:
+                    break
+                try:
+                    data = await asyncio.wait_for(comp.convert_to_base64(), timeout=min(10.0, remain))
+                except Exception:
+                    continue
+                if data and isinstance(data, str):
+                    if data.startswith("base64://") or data.startswith("http"):
+                        ref = data
+                    elif data.startswith("data:") and "," in data:
+                        ref = "base64://" + data.split(",", 1)[1]
+                    else:
+                        ref = "base64://" + data
+                    req.image_urls.append(ref)
+                    logger.info("[BiliBot] core备图遗漏的本条图片已就地重拉附图")
+            if req.image_urls:
+                return
+        msg = str(event.message_str or "")
+        if not QQ_IMG_SIGNAL_RE.search(msg):
+            return
+        bucket = self._qq_img_idx.get(str(gid)) or []
+        spoke = self._qq_last_spoke.get(str(gid), 0.0)
+        cands = [
+            e for e in bucket
+            if float(e.get("ts", 0)) >= spoke and os.path.isfile(str(e.get("path", "")))
+        ]
+        if not cands:
+            return
+        limit = max(1, int(self.config.get("QQ_IMAGE_AUTOATTACH_MAX", 5) or 5))
+        picks = cands[-limit:]
+        lines = []
+        for e in picks:
+            req.image_urls.append(str(e["path"]))
+            lines.append(
+                f"- {time.strftime('%m-%d %H:%M', time.localtime(float(e['ts'])))} "
+                f"{e.get('sender') or '群友'}发送一张"
+            )
+        block = (
+            f"【群图档案】本条消息不含图片，但你上次说话之后本群出现过 {len(picks)} 张图，"
+            "已按时间顺序自动附图：\n" + "\n".join(lines) + "\n"
+            "用户所指若是其中之一，请直接看图回应；禁止声称图片没传到/没收到/没落下来。"
+            "若所附图片与用户所指明显对不上，只需自然地说没找到他说的那张图。"
+        )
+        self._inject_context_block_before_user(req, block)
+        logger.info(f"[BiliBot] 已按需附上 {len(picks)} 张近期群图(群{gid})")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("qq模式")
@@ -2627,6 +2829,16 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             msg = event.message_str or ""
             if not msg or msg.startswith("/"):
                 return
+            # 按需群图附图：仅群聊（档案按群分桶），失败静默不影响主链路。
+            try:
+                if event.get_platform_name() != "webchat":
+                    _img_gid = str(event.get_group_id() or "")
+                else:
+                    _img_gid = ""
+            except Exception:
+                _img_gid = ""
+            if _img_gid:
+                await self._maybe_attach_recent_group_images(event, req, _img_gid)
             if self._inject_recent_group_share_into_request(event, req):
                 logger.debug("[BiliBot] recent group share context injected before user message")
             qq_id = str(event.get_sender_id())

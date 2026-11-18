@@ -27,6 +27,7 @@ MUTE_DIR = os.path.expanduser("~/.config/fatfish-sentinel")
 KIT_DIR = "/home/ubuntu/ops/kit"
 GRAB_SH = "/home/ubuntu/ops/grab-screen.sh"
 QR_PNG = "/tmp/fish_qr.png"
+CORE_RESTART_SH = "/home/ubuntu/ops/restart_astrbot.sh"
 _grab_lock = threading.Lock()
 GATES = {  # key -> (label, file, action prefix uses key)
     "qq": ("QQ 闸门（消息全哑，零 token）", MUTE_DIR + "/qq_mute"),
@@ -130,6 +131,70 @@ def grab_qr():
             return None
 
 
+def core_status():
+    """Return astrbot systemd state, e.g. active/inactive/failed/unknown."""
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-active", "astrbot"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return (r.stdout or "").strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def core_restart():
+    left = RESTART_COOLDOWN - (time.time() - _state.get("last_core_restart", 0.0))
+    if left > 0:
+        return f"冷却中，请 {int(left)}s 后再试"
+    _state["last_core_restart"] = time.time()
+    subprocess.Popen(
+        ["bash", CORE_RESTART_SH],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return "已下达重启（约10~25秒后生效），状态灯实时更新"
+
+
+def core_uptime():
+    """Return astrbot main process elapsed seconds, or None when unknown."""
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", "astrbot", "-p", "MainPID", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        pid = (r.stdout or "").strip()
+        if not pid or pid == "0":
+            return None
+        r = subprocess.run(
+            ["ps", "-o", "etimes=", "-p", pid],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return int((r.stdout or "").strip())
+    except Exception:
+        return None
+
+
+def status_json():
+    """Compact payload for the page poller (GET /{token}/status)."""
+    st = core_status()
+    up = core_uptime() if st == "active" else None
+    return json.dumps(
+        {
+            "a": st,
+            "u": up,
+            "r": round(_state.get("last_core_restart", 0.0), 1),
+            "s": round(time.time(), 1),
+        }
+    )
+
+
 def run_action(name, form):
     """Dispatch a button name. Returns a short note shown on the page."""
     parts = name.split("_")
@@ -150,6 +215,8 @@ def run_action(name, form):
         return "已开闸"
     if name == "restart":
         return restart_protocol()
+    if name == "core_restart":
+        return core_restart()
     if name in EXTRA_ACTIONS:
         return str(EXTRA_ACTIONS[name]())
     return "未知动作"
@@ -191,6 +258,37 @@ def tools_card(token):
     )
 
 
+def live_js(token):
+    """Poll /{token}/status every 2s and patch the AstrBot card in place."""
+    return (
+        "<script>(function(){"
+        "var S='/" + token + "/status';"
+        "function G(i){return document.getElementById(i);}"
+        "function pad(n){return (n<10?'0':'')+n;}"
+        "function fmt(s){if(s==null)return'\\u2014';var h=Math.floor(s/3600);"
+        "return h+':'+pad(Math.floor(s%3600/60))+':'+pad(s%60);}"
+        "function fail(){var d=G('astdot');if(d)d.textContent='\\u26aa \\u8fde\\u63a5\\u5931\\u8d25';"
+        "setTimeout(tick,4000);}"
+        "function tick(){fetch(S,{cache:'no-store'})"
+        ".then(function(r){return r.json();})"
+        ".then(function(j){var map={active:'\\ud83d\\udfe2 \\u8fd0\\u884c\\u4e2d',"
+        "activating:'\\ud83d\\udfe1 \\u542f\\u52a8\\u4e2d',inactive:'\\ud83d\\udd34 \\u5df2\\u505c\\u6b62',"
+        "failed:'\\ud83d\\udd34 failed',unknown:'\\u26aa \\u672a\\u77e5'};"
+        "var d=G('astdot'),u=G('astup'),h=G('asthint');if(!d||!u)return;"
+        "d.textContent=map[j.a]||('\\ud83d\\udd34 '+j.a);"
+        "u.textContent=j.a==='active'?fmt(j.u):'\\u2014';"
+        "var t='';"
+        "if(j.r&&(j.s-j.r)<60){"
+        "if(j.a!=='active'&&j.s<j.r+25){t='\\ud83d\\udd04 \\u91cd\\u542f\\u8fdb\\u884c\\u4e2d\\u2026 \\u7ea6\\u5269 '"
+        "+Math.max(0,Math.ceil(j.r+25-j.s))+' \\u79d2';}"
+        "else if(j.a==='active'&&j.u!=null&&j.u<=45){t='\\u2705 \\u91cd\\u542f\\u5b8c\\u6210\\uff0c'"
+        "+'\\u65b0\\u8fdb\\u7a0b\\u5df2\\u8fd0\\u884c '+fmt(j.u);}}"
+        "if(h){h.style.display=t?'block':'none';h.textContent=t;}"
+        "setTimeout(tick,2000);}).catch(fail);}"
+        "tick();})();</script>"
+    )
+
+
 def page(token, note):
     online, uid, nick = login_info()
     dot = f"🟢 在线 · {nick}（{uid}）" if online else "⚪ 离线"
@@ -208,10 +306,28 @@ def page(token, note):
             "🔁 重启 SnowLuma 换码</button></div>"
         )
     login_card += "</div>"
+    st = core_status()
+    up = core_uptime() if st == "active" else None
+    core_dot = (
+        "🟢 运行中"
+        if st == "active"
+        else ("🟡 启动中" if st == "activating" else f"🔴 {st}")
+    )
+    core_card = (
+        '<div class="card"><div class="t">🤖 AstrBot 核心</div>'
+        '<div>进程状态：<span id="astdot">' + core_dot + "</span>"
+        ' · 已运行 <span id="astup">'
+        + (hms(up) if up is not None else "—")
+        + '</span></div>'
+        '<div id="asthint" style="display:none;color:#ffd479"></div>'
+        '<div class="b"><button name="act" value="core_restart" form="panel"'
+        ' onclick="return confirm(\'确定重启 AstrBot？消息将中断约10~30秒\')">'
+        "🔁 重启 AstrBot</button></div></div>"
+    )
     note_html = f'<div class="note">{note}</div>' if note else ""
     return (
         "<!doctype html><html><head><meta charset=utf-8>"
-        '<meta http-equiv="refresh" content="10">'
+        '<meta http-equiv="refresh" content="30">'
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>肥鱼中控</title><style>"
         "body{font-family:sans-serif;background:#101820;color:#dfe8ef;margin:10px}"
@@ -228,10 +344,13 @@ def page(token, note):
         + gate_card("qq")
         + gate_card("bili")
         + login_card
+        + core_card
         + drops_card()
         + tools_card(token)
         + note_html
-        + "<input type=hidden name=act value=></form></body></html>"
+        + "<input type=hidden name=act value=></form>"
+        + live_js(token)
+        + "</body></html>"
     )
 
 
@@ -426,12 +545,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, img, "image/png")
             return
         if route.startswith("tools/"):
-            path = os.path.join(KIT_DIR, os.path.basename(route[6:]))
+            path = os.path.join(KIT_DIR, os.path.basename(urllib.parse.unquote(route[6:])))
             if os.path.isfile(path):
                 with open(path, "rb") as f:
                     self._send(200, f.read(), "application/octet-stream")
             else:
                 self._send(404, "not found", "text/plain")
+            return
+        if route == "status":
+            self._send(200, status_json(), "application/json")
             return
         if route:
             self._send(404, "not found", "text/plain")

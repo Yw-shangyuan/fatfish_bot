@@ -6,8 +6,8 @@
 
 | 名称 | 形态 | 跑什么 | 端口 |
 | --- | --- | --- | --- |
-| astrbot.service | systemd 单元 | 机器人本体（AstrBot） | 6185、6199（仅本机） |
-| snowluma | Docker 容器（host 网络） | QQ 协议端 | 3000、3001、5099、5900、6081、9210 |
+| astrbot.service | systemd 单元 | 机器人本体（AstrBot） | 6185（WebUI 管理面板，防火墙待放行，见 SERVER.md 5.3）、6199（仅本机） |
+| snowluma | Docker 容器（host 网络） | QQ 协议端 | 3000、3001、5099、9210（协议接口）；5900（x11vnc）、6081（noVNC）为配套 Xvfb 图形栈 |
 | fatfish-qr.service | systemd 单元 | 肥鱼中控面板 + 临时下载口 | 8765 |
 | cron: backup-data.sh | cron | 数据冷备份 | — |
 | cron: sentinel.py | cron（每 5 分钟） | 巡检 + 微信告警 | — |

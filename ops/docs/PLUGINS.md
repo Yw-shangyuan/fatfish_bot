@@ -61,13 +61,13 @@ astrbot.service（systemd，Restart=always/5s，WorkingDirectory=/home/ubuntu/As
 
 | 插件 | 声明版本 | 代码量 | 注册命令 | 运行态 |
 |:---|:---|:---|:---|:---|
-| `astrbot_plugin_bilibili_ai_bot` | metadata `1.8.0`（与 CHANGELOG 最新条目 `v1.8.0` 对齐，2026-11-02；1.6.1–1.7.x 错位始末见 §7.3 #12） | Python 37275 行（含 tests 约 9000 行不参与运行）；`core/` 40+ 模块 | 58 | 启用，功能主体 |
+| `astrbot_plugin_bilibili_ai_bot` | metadata `1.9.1`（与 CHANGELOG 最新条目 `v1.9.1` 对齐，2026-11-03；1.6.1–1.7.x 错位始末见 §7.3 #12） | Python 37275 行（含 tests 约 9000 行不参与运行）；`core/` 40+ 模块 | 58 | 启用，功能主体 |
 | `astrbot_plugin_fishbox` | `0.2.0` | main.py 280 行 | 2 | 启用 |
 | `astrbot_plugin_qq_proactive` | `1.0.0` | main.py 333 行 | 1 | **`ENABLE=false`，实际闲置** |
 
 命令数按 `@filter.command` 注册字面量去重统计。上游仓库：bilibili 插件 `https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot`（本机为 git clone 安装，目录内含 `.git`）；另两个为本机自研，`repo` 字段为空，WebUI 以 `author/name` 兜底显示。
 
-人工维护用的工作副本在本地 `D:\AIagent\napcat\remote\`：`plugin_main_work.py` 与服务器上 bilibili 插件 `main.py` 逐字节一致（2026-11-02 版本号对齐后，MD5 `fcf4906f22b497864375b680cbadfc98`），另有 `core_reply_work.py`、`_conf_schema_work.json`、`README_work.md`、`CHANGELOG_work.md` 同插件副本。
+人工维护用的工作副本在本地 `D:\AIagent\napcat\remote\`：`plugin_main_work.py` 与服务器上 bilibili 插件 `main.py` 逐字节一致（2026-11-02 版本号对齐后，MD5 `7f42f015ac11334f58c8fcd6a692007c`），另有 `core_reply_work.py`、`_conf_schema_work.json`、`README_work.md`、`CHANGELOG_work.md` 同插件副本。
 
 ---
 
@@ -173,6 +173,11 @@ astrbot.service（systemd，Restart=always/5s，WorkingDirectory=/home/ubuntu/As
 | （无常驻命令） | `MODE_PERSONA_ID` | `宇文尚元的蓝色大肥鱼` | 同 | schema 警告「必须与 agent_runner 当前引用的人格一致，否则切的不是这只」 |
 | 硬编码常量 | `OWNER_GATE_DEDUP_SEC=5.0` `main.py:49` | 5.0 | — | 连发去重窗口，**无命令可改，改一次要重启** |
 | 硬编码常量 | `QQ_STALE_MAX_AGE_SEC=1800` `main.py:46` | 1800 | — | 重连补投的离线消息丢弃阈值 |
+| `QQ_GROUP_IMAGE_ARCHIVE` | true | 同（运行时 json 未写入，取默认） | 群图存档总开关：群消息图片异步落盘，零 LLM |
+| `QQ_GROUP_IMAGE_MAX_COUNT` | 100 | 同 | 每群存档环形上限，超出删最旧 |
+| `QQ_GROUP_IMAGE_TTL_HOURS` | 72 | 同 | 存档有效期（小时），到期删除 |
+| `QQ_IMAGE_AUTOATTACH` | true | 同 | 指图消息自动附「上次对外发言以来」的存档群图 |
+| `QQ_IMAGE_AUTOATTACH_MAX` | 5 | 同 | 单次附图封顶张数（每图约 1.5k token） |
 | 硬编码常量 | `QQ_SEND_MIN_GAP=5.0` / `QQ_SEND_MAX_GAP=12.0` / `QQ_SEND_QUEUE_LIMIT=120.0` `main.py:40-42` | 同 | — | 出站随机间隔与队列上限 |
 
 `qq*` 共 **20** 条注册命令 = 17 条风控/模式/群与联系人管理（上表中 `qq设置`…`qq模式` 的 17 项命令，含 2026-11-02 新增 7 条）+ 3 条只读查看器（`qq人格` `qq知识库` `qq白名单`）。群级覆盖表 `group_prefs.json` 与联系人 `contacts.json` 是**插件数据目录文件而非配置键**（面板 schema 无 dict 类型，见 §3.8），所有读写走 `_save_json` 原子写，改后立即生效、重启不丢。
@@ -392,3 +397,5 @@ class BiliBiliBot(Star, +19 Mixin)                 main.py:123
 - 2026-11-02：`astrbot_plugin_fishbox` 升到 `0.2.0`——面板配置接上生效、截断拆为卡组与工具两个键、删除写死的管理员 QQ 号默认值。
 - 2026-11-02 17:41：bilibili 插件上线「群聊/联系人管理」（`main.py` 2414→2702 行，命令 51→58）：群级要@/静音/意愿覆盖（`group_prefs.json`，静音群仅主人@豁免）、私聊联系人名单（`contacts.json`）与陌生人私信闸门 `QQ_PRIVATE_CONTACT_GATE`（默认关，schema 已声明）。全部默认位=行为零变化。改动前备份 `*.bak-20261102-groups`，已重启生效。
 - 2026-11-02 19:46：版本对齐——`metadata.yaml` 与 `main.py` 头部/注册/状态面板共四处 1.6.1 → 1.8.0，与 CHANGELOG `v1.8.0` 条目一致，#12 隐患了结；备份 `*.bak-20261102-ver`，astrbot 已重启生效。
+- 2026-11-03 16:00：bilibili 插件 v1.9.0 上线「群图档案 + 按需附图」（main.py 2701→2890 行，+5 配置键）：群消息图片在 capture 钩子异步落盘（md5 去重、环形清理、零 LLM）；文本指图而本条无图时，自动把上次发言以来的存档图按时间序附进请求（封顶 5）并注入措辞纠偏说明块；本条带图但系统漏拿时 12 秒预算就地重拉。「图片没到我这里」根因＝消息间图片在群上下文里只剩 [Image] 文本墓碑、像素从未随请求送达。
+- 2026-11-03 16:16：v1.9.1 热修（同日晚于上线 16 分钟）：①存档误用 startswith(base64://) 判定——core 契约 convert_to_base64 返回裸 base64，像素下载成功仍被丢弃、桶恒空，改三形态兼容；②发送戳记从 cls 探群号在 classmethod+全 kwarg 调用形态下恒失败，改读 is_group+session_id。首次实测（16:05）即因①暴露附图恒空。

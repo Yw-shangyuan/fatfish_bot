@@ -1,3 +1,16 @@
+## v1.9.1 (2026-11-03)
+
+- 修复 v1.9.0 存档落盘空转：core 契约里 `Image.convert_to_base64()` 返回值不带 `base64://` 前缀（components.py docstring），而存档判断误用 `startswith("base64://")`，像素下载成功却被静默丢弃、桶恒空。改为前缀/data URI/裸 base64 三形态兼容解码，落盘失败日志 debug 提级 warning。
+- 修复发送戳记不触发：`AiocqhttpMessageEvent.send_message` 实际是 classmethod 且调用方全 kwarg 传参（bot/message_chain/event/is_group/session_id），原实现从 `cls` 探 `get_group_id()` 永远拿不到群号。改为优先读 `is_group + session_id` 直达群号，位置参数/事件对象探测保留为兜底。
+- 嗅探路径1（本条带图竞态重拉）同步兼容三种返回形态：http/base64:// 原样、data URI 剥壳、裸 base64 补 `base64://` 前缀后再交给 core 备图。
+
+## v1.9.0 (2026-11-03)
+
+- 新增群图档案与按需附图（治「图片没到我这里」）：群消息含图时由 capture 钩子（priority=70）异步把像素落盘到 `data/group_images/<群号>/`（md5 命名去重，零 LLM 成本），索引 `group_image_index.json`，每群环形上限 `QQ_GROUP_IMAGE_MAX_COUNT`(100) + 有效期 `QQ_GROUP_IMAGE_TTL_HOURS`(72h)，`QQ_GROUP_IMAGE_ARCHIVE` 总开关。
+- 按需附图：`inject_bili_memory`（on_llm_request，先于 core 备图）嗅探指图意图——本条消息不含图但文本命中「上图/这图/照片/截图/表情包」等信号词时，把肥鱼上次对外发言之后的存档群图（按时间序，封顶 `QQ_IMAGE_AUTOATTACH_MAX`=5）以本地路径附进 `req.image_urls`，并注入说明块纠偏模型措辞；总开关 `QQ_IMAGE_AUTOATTACH`。
+- 竞态兜底：本条消息带 Image 组件但请求未拿到图（事件抓取时 URL 为空）时，就地同步重拉（总预算 12 秒），成功即附图；发送节流层在出站成功后记录每群「上次对外发言」时间戳（`qq_last_spoke.json`，5 秒防抖落盘），作为选图窗口起点。
+- 已知边界：只覆盖部署后出现过的图；prepare_request_images 自身拉取失败的当轮仍可能丢图（下一轮嗅探可救回）；附图判定为正则信号词，误伤仅多耗 ~1.5k token/图。
+
 ## v1.8.0 (2026-11-02)
 
 - 新增群级覆盖：每群可单独设置 要@（`/qq群@ 开|关|默认`）、静音（`/qq群静音 开|关|默认`，静音群仅「主人且@肥鱼」豁免，主人正常发言不豁免）、群友意愿（`/qq群意愿 0-100|默认`，100=免检直回）；缺项回落全局同名配置。总览 `/qq群 列表`、单群生效值 `/qq群`、清空 `/qq群忘记`。存插件数据目录 `group_prefs.json`（面板 schema 无 dict 类型，故不占配置键）。

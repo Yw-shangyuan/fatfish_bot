@@ -12,7 +12,7 @@ import json
 import os
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -331,3 +331,65 @@ class ProactiveCompanion(Star):
             os.replace(tmp, STATE_FILE)
         except Exception as exc:
             logger.warning(f"[主动伴聊] 状态保存失败: {exc}")
+
+
+    # ───────────────────────────── 定时任务列表命令 ─────────────────────────────
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("定时任务")
+    async def command_list_cron_jobs(self, event: AstrMessageEvent):
+        """列出 CronJobManager 下全部定时任务，仅 ADMIN 可用（框架层强制鉴权）。"""
+        try:
+            jobs = await self.context.cron_manager.list_jobs()
+        except Exception as exc:
+            logger.error(f"[定时任务] list_jobs 失败: {exc}")
+            yield event.plain_result(f"读取定时任务失败: {exc}")
+            return
+        if not jobs:
+            yield event.plain_result("当前没有定时任务")
+            return
+
+        def _fmt_time(dt) -> str:
+            if not dt:
+                return "-"
+            try:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone().strftime("%m-%d %H:%M")
+            except Exception:
+                return str(dt)
+
+        def _fmt_target(job) -> str:
+            payload = getattr(job, "payload", None)
+            if not isinstance(payload, dict):
+                return ""
+            parts = []
+            session = payload.get("session")
+            sender = payload.get("sender_id")
+            if session is not None:
+                parts.append(str(session))
+            if sender is not None:
+                parts.append("sender=" + str(sender))
+            return " | ".join(parts)
+
+        lines = ["定时任务清单（共 " + str(len(jobs)) + " 条）"]
+        for i, job in enumerate(jobs, 1):
+            state = "启" if job.enabled else "停"
+            one = "+单次" if getattr(job, "run_once", False) else ""
+            sched = job.cron_expression or "即时/单次"
+            tz = job.timezone or ""
+            nxt = _fmt_time(getattr(job, "next_run_time", None))
+            last = _fmt_time(getattr(job, "last_run_at", None))
+            target = _fmt_target(job)
+            err = ("\n   上次错误: " + str(job.last_error)[:80]) if job.last_error else ""
+            t_line = ("\n   投递: " + target) if target else ""
+            lines.append(
+                "\n" + str(i) + ". [" + state + one + "] " + str(job.name)
+                + "\n   类型: " + str(job.job_type) + " | 计划: " + str(sched) + " " + str(tz)
+                + "\n   下次: " + nxt + " | 上次: " + last
+                + t_line + err
+            )
+        text = "\n".join(lines)
+        if len(text) > 1200:
+            text = text[:1200] + "\n…（内容过长，已截断）"
+        yield event.plain_result(text)

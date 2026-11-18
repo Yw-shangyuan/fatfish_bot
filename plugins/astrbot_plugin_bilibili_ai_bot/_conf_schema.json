@@ -1862,5 +1862,41 @@
     "items": {"type": "string"},
     "default": [],
     "hint": "为空=任何知识库都不可查看。由 /qq白名单 +知识库:<名> 增删。查看类指令仅限主人私聊。"
+  },
+  "QQ_GROUP_IMAGE_ARCHIVE": {
+    "description": "【群图片】把群里发过的图片像素存档",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后过闸的图片会异步下载到插件数据目录留档（纯磁盘操作，零LLM花费），供之后提到图时回看。按每群上限与有效期环形清理。"
+  },
+  "QQ_GROUP_IMAGE_MAX_COUNT": {
+    "description": "【群图片】每群存档张数上限",
+    "type": "int",
+    "default": 100,
+    "min": 10,
+    "max": 1000,
+    "hint": "单群存档超出后删最旧的。100张大约占用50~150MB磁盘。"
+  },
+  "QQ_GROUP_IMAGE_TTL_HOURS": {
+    "description": "【群图片】存档有效期（小时）",
+    "type": "int",
+    "default": 72,
+    "min": 1,
+    "max": 720,
+    "hint": "超过该时长的存档图片会被删除。"
+  },
+  "QQ_IMAGE_AUTOATTACH": {
+    "description": "【群图片】提到图时自动附上近期群图",
+    "type": "bool",
+    "default": true,
+    "hint": "消息文本提到 上图/这图/照片 等而本条没带图时，自动把肥鱼上次对外发言之后的群图附给模型；本条带图但系统漏拿时也会就地补拉一次。"
+  },
+  "QQ_IMAGE_AUTOATTACH_MAX": {
+    "description": "【群图片】一次最多自动附图张数",
+    "type": "int",
+    "default": 5,
+    "min": 1,
+    "max": 10,
+    "hint": "触发时把上次说话以来的图按时间顺序附上，最多取此张数。每图约消耗1500 token。"
   }
 }

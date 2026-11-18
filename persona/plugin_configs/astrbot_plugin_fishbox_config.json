@@ -1,0 +1,7 @@
+{
+  "enable": true,
+  "fishbox_home": "/home/ubuntu/fishbox",
+  "socket_path": "",
+  "max_deck_text": 900,
+  "max_tool_output": 1500
+}
