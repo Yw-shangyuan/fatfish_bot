@@ -1666,9 +1666,23 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         self.config.save_config()
         yield event.plain_result(f"✅ 群判定上下文上限已设为 {v} 条")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq限流")
-    async def cmd_qq_rate(self, event: AstrMessageEvent):
+    def api_get_rate(self):
+        # 公开 API：供 qq_channel 门面读取限流配置。
+        return (
+            int(self.config.get("QQ_RATE_PER_MIN", 0) or 0),
+            int(self.config.get("QQ_RATE_COOLDOWN_SEC", 0) or 0),
+        )
+
+    def api_set_rate(self, per: int, cool: int) -> None:
+        # 公开 API：写限流配置并清空滑动窗口，避免残留旧冷却。
+        self.config["QQ_RATE_PER_MIN"] = per
+        self.config["QQ_RATE_COOLDOWN_SEC"] = cool
+        self._qq_rate_marks = []
+        self._qq_rate_block_until = 0.0
+        self.config.save_config()
+
+    # 命令门面已迁至保留插件 qq_channel，此处仅留旧实现备查，不再注册。
+    async def _retired_qq_rate(self, event: AstrMessageEvent):
         toks = event.message_str.strip().split()
         if len(toks) < 2:
             per_min = int(self.config.get("QQ_RATE_PER_MIN", 0) or 0)
