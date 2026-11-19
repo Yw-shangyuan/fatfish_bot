@@ -1,0 +1,37 @@
+{
+  "enable": {
+    "type": "bool",
+    "description": "总开关；停用后不注入用户资料，也不自动修改会话知识库",
+    "default": true
+  },
+  "data_dir": {
+    "type": "string",
+    "description": "core.md、bindings.json 和 users 目录所在位置",
+    "default": "/home/ubuntu/AstrBot/data/fatfish_user_context"
+  },
+  "export_dir": {
+    "type": "string",
+    "description": "用户介绍与记忆的导出根目录",
+    "default": "/home/ubuntu/exports/fatfish_user_context"
+  },
+  "persona_id": {
+    "type": "string",
+    "description": "由 core.md 管理的 AstrBot 主人格 ID；留空则不同步主人格",
+    "default": "宇文尚元的蓝色大肥鱼"
+  },
+  "top_k": {
+    "type": "int",
+    "description": "已绑定用户检索知识库时最终返回的知识块数量",
+    "default": 5
+  },
+  "max_intro_chars": {
+    "type": "int",
+    "description": "单次请求最多注入的用户介绍字符数，0 表示不截断",
+    "default": 4000
+  },
+  "max_memory_chars": {
+    "type": "int",
+    "description": "单次请求最多注入的用户记忆字符数，0 表示不截断",
+    "default": 6000
+  }
+}
