@@ -1738,7 +1738,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
     # ===== 群级覆盖与私聊联系人：/qq群 系列 + /qq联系人 + /qq私信闸 =====
     # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
     async def api_cmd_qq_group_show(self, event: AstrMessageEvent):
-        """查看群级配置：/qq群 看本群生效值；/qq群 列表 总览全部覆盖。"""
+        """查看群级配置：/qq群 看本群；/qq群 <群号> 查指定群；/qq群 列表 总览全部覆盖。"""
         toks = event.message_str.strip().split()
         if len(toks) >= 2 and toks[1] == "列表":
             prefs = self._load_json(GROUP_PREFS_FILE, {}) or {}
@@ -1758,12 +1758,9 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             lines.append("整群清空：/qq群忘记 <群号>")
             yield event.plain_result("\n".join(lines))
             return
-        try:
-            gid = str(event.get_group_id() or "")
-        except Exception:
-            gid = ""
+        gid, _rest = self._qq_target_gid(event, toks)
         if not gid:
-            yield event.plain_result("本命令需在群内使用（或 /qq群 列表 总览）；要配置别的群，在命令尾部加群号")
+            yield event.plain_result("本命令需在群内使用，或在尾部指定群号：/qq群 123456；/qq群 列表 可总览全部覆盖")
             return
         ent = (self._load_json(GROUP_PREFS_FILE, {}) or {}).get(gid) or {}
         na_eff = bool(self._qq_group_pref(gid, "need_at", self.config.get("QQ_NEED_AT", False)))
