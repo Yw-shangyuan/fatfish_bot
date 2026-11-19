@@ -48,3 +48,11 @@ git -C /home/ubuntu/bot-src     ls-remote --heads origin main
 git -C /home/ubuntu/bot-src     ls-remote --heads gitee  main
 ```
 四条返回的哈希应分别等于两个本地仓的 HEAD。
+
+## 5. 平台标签与真实实现（勿凭标签推断）
+
+| 平台 id | 适配器 type | 真实协议端 |
+|:--|:--|:--|
+| napcat-qq | aiocqhttp（OneBot v11） | SnowLuma，容器 motricseven7/snowluma:latest |
+
+id 里的 napcat 是历史标签（NapCat 会顶号，已弃用）。改 id 会让所有 napcat-qq:FriendMessage:* 白名单条目与 conversations 历史 key 失配，故保持不改，只在此登记事实。

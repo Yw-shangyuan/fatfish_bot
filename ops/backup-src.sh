@@ -32,7 +32,8 @@ host: Ubuntu 24.04.4 LTS / x86_64
 astrbot_runtime: v4.29.1 (from server logs; official open source, not in this repo)
 astrbot_snapshot_commit: $SNAP (working tree of /home/ubuntu/AstrBot, fork baseline; upstream commit e5e21b7)
 astrbot_snapshot_repo: fish-astrbot on GitHub (Yw-shangyuan) and Gitee (YwShangyuan)
-napcat_image: mlikiowa/napcat-docker:latest
+qq_protocol_endpoint: motricseven7/snowluma:latest (container: snowluma)
+note: platform id napcat-qq is a legacy label; adapter type = aiocqhttp
 plugin: astrbot_plugin_bilibili_ai_bot
 67c7161
 https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot.git

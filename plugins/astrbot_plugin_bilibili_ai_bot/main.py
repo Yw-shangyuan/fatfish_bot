@@ -93,6 +93,21 @@ def _group_ids_in_wl(ps):
     return out
 
 
+QQ_ADAPTER_NAMES = {"aiocqhttp"}
+
+
+def _is_qq_event(event) -> bool:
+    """是否 QQ 通道事件：按适配器类型判定。
+
+    平台 id 叫 napcat-qq 只是历史标签，实际协议端是 SnowLuma，
+    二者都通过 OneBot v11（aiocqhttp）接入，故不能按 id 字符串判定。
+    """
+    try:
+        return str(event.get_platform_name()) in QQ_ADAPTER_NAMES
+    except Exception:
+        return False
+
+
 def _is_group_event(event):
     """是否群聊事件：按消息类型判定，不再依赖 group_id 是否非空。"""
     try:
@@ -662,6 +677,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
     @filter.event_message_type(filter.EventMessageType.ALL, priority=9999)
     async def on_qq_mute_gate(self, event: AstrMessageEvent):
         """Stop the whole pipeline (and thus any LLM/token usage) while muted."""
+        if not _is_qq_event(event):
+            return
         until = _read_mute(QQ_MUTE_FILE)
         if until is not None:
             event.stop_event()
@@ -1097,6 +1114,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         # 群友群消息意愿闸门：独立于主人闸门与模式约束，只受
         # QQ_GROUP_GUEST_WILLING 控制（100=必回=维持现状）。评分复用主人链路，
         # 去重键带 |g 后缀与主人判定分开计数，互不搭车。
+        if not _is_qq_event(event):
+            return
         try:
             _g_gid = str(event.get_group_id() or "")
             _g_admin = event.is_admin()
@@ -1176,7 +1195,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         priority=70 先于安全闸门(65)与主人 worthy 闸门(60)运行；缓冲含当前
         消息本身（评分端会跳过末条）；只记录，从不拦截。"""
         try:
-            if event.get_platform_name() == "webchat":
+            if not _is_qq_event(event):
                 return
             gid = str(event.get_group_id() or "")
         except Exception:
@@ -1462,7 +1481,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         限制；限流为 60 秒滑动窗口计"闸门放行票数"，超限进入冷却期全静默。被本闸门
         拦下的消息不会走到 worthy 闸门，零 LLM 花费。"""
         try:
-            if event.get_platform_name() == "webchat":
+            if not _is_qq_event(event):
                 return
         except Exception:
             return
@@ -1845,9 +1864,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         else:
             yield event.plain_result(f"群 {gid} 本来就没有专属配置")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq联系人")
-    async def cmd_qq_contacts(self, event: AstrMessageEvent):
+    # 命令已迁至 core 保留插件 channel_contacts（/qq联系人、/wx联系人），仅留实现备查。
+    async def _retired_qq_contacts(self, event: AstrMessageEvent):
         """QQ 私聊白名单：查看 / +QQ号 [备注] / -QQ号。真相唯一：主程序访问控制白名单。"""
         toks = event.message_str.strip().split()
         cfg = _core_cfg(self, event)
@@ -1971,9 +1989,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             return
         yield event.plain_result("用法：/qq联系人 查看名单 · /qq联系人 +QQ号 [备注] · /qq联系人 -QQ号")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq私信闸")
-    async def cmd_qq_private_gate(self, event: AstrMessageEvent):
+    # 同上：状态汇报已并入 /qq联系人。
+    async def _retired_qq_private_gate(self, event: AstrMessageEvent):
         """私聊准入状态汇报：判定已统一由主程序访问控制承担。"""
         cfg = _core_cfg(self, event)
         if cfg is None:
@@ -2938,7 +2955,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         # 入口闸的 stop_event 可能被未知路径绕过，这里在 LLM 调用点前再拦一次。
         # 命令消息以唤醒词 "/" 开头，is_at_or_wake_command 为 True，不受影响。
         try:
-            if _is_group_event(event) and event.get_platform_name() != "webchat":
+            if _is_qq_event(event) and _is_group_event(event):
                 _v_gid = str(event.get_group_id() or "")
                 if bool(self._qq_group_pref(_v_gid, "mute", self.config.get("QQ_GROUP_MUTE", False))) and not (
                     event.is_admin() and event.is_at_or_wake_command
@@ -2967,7 +2984,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                 return
             # 按需群图附图：仅群聊（档案按群分桶），失败静默不影响主链路。
             try:
-                if event.get_platform_name() != "webchat":
+                if _is_qq_event(event) and _is_group_event(event):
                     _img_gid = str(event.get_group_id() or "")
                 else:
                     _img_gid = ""
