@@ -1381,9 +1381,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         self._inject_context_block_before_user(req, block)
         logger.info(f"[BiliBot] 已按需附上 {len(picks)} 张近期群图(群{gid})")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq模式")
-    async def cmd_qq_mode(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_mode(self, event: AstrMessageEvent):
         yield event.plain_result(await self._modes_command_text(event, "qq"))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -1544,9 +1543,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                 return
             marks.append(now)
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq设置")
-    async def cmd_qq_settings(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_settings(self, event: AstrMessageEvent):
         quiet_active, quiet_spec = self._qq_quiet_window()
         per_min = int(self.config.get("QQ_RATE_PER_MIN", 0) or 0)
         cooldown = int(self.config.get("QQ_RATE_COOLDOWN_SEC", 0) or 0)
@@ -1567,9 +1565,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         ]
         yield event.plain_result("\n".join(lines))
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq静默")
-    async def cmd_qq_quiet(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_quiet(self, event: AstrMessageEvent):
         toks = event.message_str.strip().split(maxsplit=1)
         if len(toks) < 2:
             active, spec = self._qq_quiet_window()
@@ -1602,9 +1599,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         active, _ = self._qq_quiet_window()
         yield event.plain_result(f"✅ 静默时段已设为 {fmt}（仅群聊，私聊豁免）{'; 当前正处于窗口内，立刻开始装死' if active else ''}")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq活跃")
-    async def cmd_qq_active(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_active(self, event: AstrMessageEvent):
         toks = event.message_str.strip().split(maxsplit=1)
         cur = int(self.config.get("QQ_ACTIVE_SCORE", 50) or 0)
         if len(toks) < 2 or not toks[1].strip().isdigit():
@@ -1616,9 +1612,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         mood = "进入高冷模式，装死本鲸专业得很" if v <= 30 else ("放开手脚，有话就接" if v >= 70 else "中庸之道，咕噜")
         yield event.plain_result(f"✅ 活跃值已设为 {v}/100：{mood}")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq意愿")
-    async def cmd_qq_willing(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_willing(self, event: AstrMessageEvent):
         toks = event.message_str.strip().split(maxsplit=1)
         cur = int(self.config.get("QQ_GROUP_OWNER_WILLING", 100) or 0)
         if len(toks) < 2 or not toks[1].strip().isdigit():
@@ -1633,9 +1628,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         mood = "群里句句必回主人" if v >= 100 else ("按消息价值挑着回" if v > 0 else "群里对主人装死（命令除外）")
         yield event.plain_result(f"✅ 群聊主人意愿值已设为 {v}/100（回话门槛：价值分>{100 - v}）：{mood}")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq群友意愿")
-    async def cmd_qq_guest_willing(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_guest_willing(self, event: AstrMessageEvent):
         toks = event.message_str.strip().split(maxsplit=1)
         cur = int(self.config.get("QQ_GROUP_GUEST_WILLING", 100) or 0)
         if len(toks) < 2 or not toks[1].strip().isdigit():
@@ -1650,9 +1644,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         mood = "群友说啥都接" if v >= 100 else ("挑有价值的接，闲聊装死" if v > 0 else "群里对群友彻底装死（@也没用）")
         yield event.plain_result(f"✅ 群聊群友意愿值已设为 {v}/100（回话门槛：价值分>{100 - v}）：{mood}")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq上下文")
-    async def cmd_qq_ctx(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_ctx(self, event: AstrMessageEvent):
         toks = event.message_str.strip().split(maxsplit=1)
         cur = int(self.config.get("QQ_GROUP_OWNER_CTX", 5) or 0)
         if len(toks) < 2 or not toks[1].strip().isdigit():
@@ -1704,9 +1697,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         self.config.save_config()
         yield event.plain_result("✅ 限流已关闭" if per <= 0 else f"✅ 限流已设为：每分钟最多 {per} 条放行，超限静默 {cool} 秒")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq要@")
-    async def cmd_qq_needat(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_needat(self, event: AstrMessageEvent):
         toks = event.message_str.strip().split(maxsplit=1)
         cur = bool(self.config.get("QQ_NEED_AT", False))
         if len(toks) < 2:
@@ -1724,9 +1716,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         self.config.save_config()
         yield event.plain_result("✅ 群聊要@已开启：没 @ 肥鱼的话人家装死给你看，喵~" if on else "✅ 群聊要@已关闭：恢复自由搭话模式")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq群聊")
-    async def cmd_qq_group_mute(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_group_mute(self, event: AstrMessageEvent):
         toks = event.message_str.strip().split(maxsplit=1)
         cur = bool(self.config.get("QQ_GROUP_MUTE", False))
         if len(toks) < 2:
@@ -1745,9 +1736,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         yield event.plain_result("🔇 群聊全禁已开启：群里说什么本鱼都装死，私聊和命令不受影响" if mute else "🔊 群聊回复已恢复：按要@和静默时段规则正常接话")
 
     # ===== 群级覆盖与私聊联系人：/qq群 系列 + /qq联系人 + /qq私信闸 =====
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq群")
-    async def cmd_qq_group_show(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_group_show(self, event: AstrMessageEvent):
         """查看群级配置：/qq群 看本群生效值；/qq群 列表 总览全部覆盖。"""
         toks = event.message_str.strip().split()
         if len(toks) >= 2 and toks[1] == "列表":
@@ -1788,9 +1778,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             "改法：/qq群@ 开|关|默认 · /qq群静音 开|关|默认 · /qq群意愿 0-100|默认 · /qq群忘记"
         )
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq群@")
-    async def cmd_qq_group_needat(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_group_needat(self, event: AstrMessageEvent):
         """单群要@开关：/qq群@ 开|关|默认 [群号]。"""
         toks = event.message_str.strip().split()[1:]
         gid, rest = self._qq_target_gid(event, toks)
@@ -1813,9 +1802,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                 f"群 {gid} 当前要@：{'开' if cur else '关'}\n用法：/qq群@ 开（必须@才回）| 关（免@也回）| 默认（撤销覆盖）[群号]"
             )
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq群静音")
-    async def cmd_qq_group_localmute(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_group_localmute(self, event: AstrMessageEvent):
         """单群静音：/qq群静音 开|关|默认 [群号]。开=群里一律装死，仅主人@豁免。"""
         toks = event.message_str.strip().split()[1:]
         gid, rest = self._qq_target_gid(event, toks)
@@ -1838,9 +1826,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                 f"群 {gid} 当前静音：{'开' if cur else '关'}\n用法：/qq群静音 开（该群装死，主人@除外）| 关 | 默认 [群号]"
             )
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq群意愿")
-    async def cmd_qq_group_willing(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_group_willing(self, event: AstrMessageEvent):
         """单群群友意愿：/qq群意愿 0-100|默认 [群号]。100=群友免检直回。"""
         toks = event.message_str.strip().split()[1:]
         gid, rest = self._qq_target_gid(event, toks)
@@ -1861,9 +1848,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                 f"群 {gid} 当前群友意愿：{cur}/100\n用法：/qq群意愿 0-100（100=免检直回，0=低价值闲聊全装死）| 默认 [群号]"
             )
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq群忘记")
-    async def cmd_qq_group_forget(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_group_forget(self, event: AstrMessageEvent):
         """清空单群全部覆盖：/qq群忘记 [群号]。"""
         toks = event.message_str.strip().split()[1:]
         gid, _ = self._qq_target_gid(event, toks)
@@ -2097,9 +2083,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             pass
         return f"条目{idx}"
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq人格")
-    async def cmd_qq_persona(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_persona(self, event: AstrMessageEvent):
         try:
             if event.get_group_id():
                 yield event.plain_result("🔒 仅支持主人私聊查看，防止人设发到群里被围观，喵~")
@@ -2139,9 +2124,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         for chunk in self._qq_view_chunks(pr[0][0]):
             yield event.plain_result(chunk)
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq知识库")
-    async def cmd_qq_kb(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_kb(self, event: AstrMessageEvent):
         try:
             if event.get_group_id():
                 yield event.plain_result("🔒 仅支持主人私聊查看知识库，喵~")
@@ -2193,9 +2177,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         for chunk in self._qq_view_chunks(doc[0][0]):
             yield event.plain_result(chunk)
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("qq白名单")
-    async def cmd_qq_viewlist(self, event: AstrMessageEvent):
+    # 命令注册面已迁至保留插件 qq_channel；此处保留为后端实现，被显式调用。
+    async def api_cmd_qq_viewlist(self, event: AstrMessageEvent):
         pk = "QQ_VIEW_WHITELIST_PERSONAS"
         kk = "QQ_VIEW_WHITELIST_KBS"
         toks = event.message_str.strip().split(maxsplit=1)
