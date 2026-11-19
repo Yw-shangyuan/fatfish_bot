@@ -3,7 +3,7 @@
 """肥鱼哨兵：定时体检，异常经 Server酱 推送到微信。
 
 检查项：
-  - 协议容器在跑（snowluma 优先，napcat 回滚兜底，docker ps）
+  - 协议容器在跑（snowluma，docker ps）
   - astrbot 服务 active（systemctl）
   - QQ 登录态有效（本地 OneBot get_login_info，retcode==0；不产生任何QQ流量；
     SnowLuma 需带 onebot.json 里的 Bearer token，脚本自动读取）
@@ -77,9 +77,9 @@ def checks():
     """执行全部体检。返回 {项目名: (是否健康, 详情文本)}。"""
     out = {}
     CT = sh("docker ps --format '{{.Names}}' | grep -qx snowluma && echo snowluma "
-            "|| (docker ps --format '{{.Names}}' | grep -qx napcat && echo napcat)").stdout.strip()
-    nap_ok = CT in ("snowluma", "napcat")
-    out["协议容器"] = (nap_ok, "" if nap_ok else "snowluma/napcat 均未运行")
+            "").stdout.strip()
+    nap_ok = CT == "snowluma"
+    out["协议容器"] = (nap_ok, "" if nap_ok else "snowluma 未运行")
 
     r = sh("systemctl is-active astrbot")
     st = (r.stdout or "").strip()

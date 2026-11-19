@@ -67,7 +67,7 @@ astrbot.service（systemd，Restart=always/5s，WorkingDirectory=/home/ubuntu/As
 
 命令数按 `@filter.command` 注册字面量去重统计。上游仓库：bilibili 插件 `https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot`（本机为 git clone 安装，目录内含 `.git`）；另两个为本机自研，`repo` 字段为空，WebUI 以 `author/name` 兜底显示。
 
-人工维护用的工作副本在本地 `D:\AIagent\napcat\remote\`：`plugin_main_work.py` 与服务器上 bilibili 插件 `main.py` 逐字节一致（2026-11-02 版本号对齐后，MD5 `7f42f015ac11334f58c8fcd6a692007c`），另有 `core_reply_work.py`、`_conf_schema_work.json`、`README_work.md`、`CHANGELOG_work.md` 同插件副本。
+人工维护用的工作副本在本地 `D:\AIagent\napcat\remote\`（目录名为历史沿用，与 NapCat 软件无关）：`plugin_main_work.py` 与服务器上 bilibili 插件 `main.py` 逐字节一致（2026-11-02 版本号对齐后，MD5 `7f42f015ac11334f58c8fcd6a692007c`），另有 `core_reply_work.py`、`_conf_schema_work.json`、`README_work.md`、`CHANGELOG_work.md` 同插件副本。
 
 ---
 

@@ -52,7 +52,7 @@ function Show-Banners {
     Write-Host "  |   [3] SSH terminal to server                     | " -ForegroundColor Magenta
     Write-Host "  |   [4] Set up key auth on THIS PC (first time)    | " -ForegroundColor Magenta
     Write-Host "  |   [5] Live logs: AstrBot                         | " -ForegroundColor Magenta
-    Write-Host "  |   [6] Live logs: NapCat (QQ)                     | " -ForegroundColor Magenta
+    Write-Host "  |   [6] Live logs: SnowLuma (QQ)                     | " -ForegroundColor Magenta
     Write-Host "  |   [0] Exit (also closes tunnel)                  | " -ForegroundColor Magenta
     Write-Host "  +--------------------------------------------------+ " -ForegroundColor Magenta
     Write-Host ""
@@ -61,7 +61,7 @@ function Show-Banners {
 function Do-Panels {
     if (-not (Start-Tunnel)) { return }
     Write-Host "[*] AstrBot panel  http://127.0.0.1:6185  (user ywsy)" -ForegroundColor Cyan
-    Write-Host "[*] NapCat  panel  http://127.0.0.1:6099  (password in manual)" -ForegroundColor Cyan
+    Write-Host "[*] SnowLuma noVNC  http://127.0.0.1:6081  (VNC password: docker inspect snowluma)" -ForegroundColor Cyan
     Start-Process "http://127.0.0.1:6185"
     Start-Process "http://127.0.0.1:6099"
 }
@@ -72,8 +72,8 @@ function Do-Health {
     $cmd = @'
 echo '=== AstrBot ==='
 systemctl is-active astrbot
-echo '=== NapCat ==='
-docker ps --filter name=napcat --format '{{.Status}}'
+echo '=== SnowLuma ==='
+docker ps --filter name=snowluma --format '{{.Status}}'
 echo '=== Memory(MB) ==='
 free -m | sed -n 2p
 echo '=== Disk ==='
@@ -107,8 +107,8 @@ function Do-Log([string]$which) {
         Write-Host "=== AstrBot live log (Ctrl+C to stop) ===" -ForegroundColor Cyan
         & ssh -i "$KeyFile" $Server "sudo journalctl -u astrbot -n 60 --no-pager -f"
     } else {
-        Write-Host "=== NapCat live log (Ctrl+C to stop) ===" -ForegroundColor Cyan
-        & ssh -i "$KeyFile" $Server "sudo docker logs --tail 60 -f napcat"
+        Write-Host "=== SnowLuma live log (Ctrl+C to stop) ===" -ForegroundColor Cyan
+        & ssh -i "$KeyFile" $Server "sudo docker logs --tail 60 -f snowluma"
     }
 }
 
@@ -122,7 +122,7 @@ while ($true) {
         "3" { Write-Host "[*] enter 'exit' to come back" -ForegroundColor Cyan; & ssh -i "$KeyFile" $Server }
         "4" { Do-SetupKey }
         "5" { Do-Log "astrbot" }
-        "6" { Do-Log "napcat" }
+        "6" { Do-Log "snowluma" }
         "0" {
             if (Test-Path $PidFile) {
                 $oldpid = Get-Content $PidFile -ErrorAction SilentlyContinue

@@ -93,7 +93,7 @@
 
 - 数据：`/home/ubuntu/backup-data.sh`，cron `20 4 */3 * *`
   - 流程：停 snowluma 容器与 astrbot 服务 → tar 冷拷贝（排除日志/表情/崩溃转储）→ age 加密 → 推 GitHub 孤立分支 `backup-YYYYMMDD-HHMM` → 重启服务 → QQ 通知
-  - 内容范围：`home/ubuntu/AstrBot/data`、`srv/napcat`、`srv/snowluma`、`etc/systemd/system/astrbot.service`
+  - 内容范围：`home/ubuntu/AstrBot/data`、`srv/snowluma`、`etc/systemd/system/astrbot.service`
   - 校验：同目录 `.sha256`
 - 源码：`/home/ubuntu/backup-src.sh`，手动执行，rsync 到 bot-src 后提交推 `main`
 - 解密需要 age 私钥，私钥不在服务器上

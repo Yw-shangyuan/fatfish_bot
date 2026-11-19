@@ -53,17 +53,12 @@ sudo tar -I "gzip -1" -cf "$RAW" \
   --exclude="*__pycache__*" \
   --exclude="*.pyc" \
   --exclude="*.log" \
-  --exclude="srv/napcat/qqdata/global/nt_data/Log" \
-  --exclude="srv/napcat/qqdata/global/nt_data/Emoji" \
-  --exclude="srv/napcat/qqdata/NapCat/temp" \
-  --exclude="srv/napcat/qqdata/Crashpad" \
-  --exclude="srv/napcat/qqdata/crash_files" \
   --exclude="srv/snowluma/local/*/Log" \
   --exclude="srv/snowluma/local/*/log" \
   --exclude="srv/snowluma/local/*/*Log*" \
   --exclude="srv/snowluma/local/*/Crashpad" \
   --exclude="srv/snowluma/data/temp" \
-  -C / home/ubuntu/AstrBot/data srv/napcat srv/snowluma etc/systemd/system/astrbot.service
+  -C / home/ubuntu/AstrBot/data srv/snowluma etc/systemd/system/astrbot.service
 
 docker start snowluma >/dev/null
 sudo systemctl start astrbot

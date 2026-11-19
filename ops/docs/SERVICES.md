@@ -40,7 +40,7 @@
   - 5900：VNC 桌面（`config/vnc-password` 为 root 属主）
   - 6081：静态资源/文件服务
   - 9210：内部接口（仅本机）
-- 回滚方案：旧容器 `napcat`、`napcat-old-hostbak` 已退出（保留镜像与卷，未删除）
+- NapCat 已于 2026-11-19 彻底弃用：旧容器与镜像已删除，数据冷备于 /home/ubuntu/cold-storage/；SnowLuma 归档见 snowluma-archive 仓库
 - 常见动作（**只限人工执行；agent 禁止对 snowluma 做任何写操作**）：`docker restart snowluma`（约 40 秒；若未勾选自动登录需重新扫码）
 
 ## 4. fatfish-qr.service（肥鱼中控）
