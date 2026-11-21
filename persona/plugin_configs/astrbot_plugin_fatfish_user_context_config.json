@@ -1,0 +1,9 @@
+{
+  "enable": true,
+  "data_dir": "/home/ubuntu/AstrBot/data/fatfish_user_context",
+  "export_dir": "/home/ubuntu/exports/fatfish_user_context",
+  "persona_id": "宇文尚元的蓝色大肥鱼",
+  "top_k": 5,
+  "max_intro_chars": 4000,
+  "max_memory_chars": 6000
+}

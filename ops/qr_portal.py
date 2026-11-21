@@ -40,6 +40,13 @@ LOGIN_API = "http://127.0.0.1:3000/get_login_info"
 ONEBOT_CFG = "/srv/snowluma/data/config/onebot.json"
 RESTART_COOLDOWN = 60.0
 _state = {"last_restart": 0.0, "note": ""}
+PANEL_LOG = "/home/ubuntu/ops/panel.log"
+
+
+def panel_log(event, **fields):
+    record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": event, **fields}
+    with open(PANEL_LOG, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def read_token():
@@ -150,11 +157,16 @@ def core_restart():
     if left > 0:
         return f"冷却中，请 {int(left)}s 后再试"
     _state["last_core_restart"] = time.time()
-    subprocess.Popen(
-        ["bash", CORE_RESTART_SH],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        process = subprocess.Popen(
+            ["bash", CORE_RESTART_SH],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        panel_log("core_restart_error", detail=f"{type(exc).__name__}: {exc}")
+        return "重启进程启动失败，请查看服务器日志"
+    panel_log("core_restart_started", pid=process.pid)
     return "已下达重启（约10~25秒后生效），状态灯实时更新"
 
 
@@ -259,35 +271,10 @@ def tools_card(token):
 
 
 def live_js(token):
-    """Poll /{token}/status every 2s and patch the AstrBot card in place."""
+    """Poll status independently and submit actions without blocking the page."""
     return (
-        "<script>(function(){"
-        "var S='/" + token + "/status';"
-        "function G(i){return document.getElementById(i);}"
-        "function pad(n){return (n<10?'0':'')+n;}"
-        "function fmt(s){if(s==null)return'\\u2014';var h=Math.floor(s/3600);"
-        "return h+':'+pad(Math.floor(s%3600/60))+':'+pad(s%60);}"
-        "function fail(){var d=G('astdot');if(d)d.textContent='\\u26aa \\u8fde\\u63a5\\u5931\\u8d25';"
-        "setTimeout(tick,4000);}"
-        "function tick(){fetch(S,{cache:'no-store'})"
-        ".then(function(r){return r.json();})"
-        ".then(function(j){var map={active:'\\ud83d\\udfe2 \\u8fd0\\u884c\\u4e2d',"
-        "activating:'\\ud83d\\udfe1 \\u542f\\u52a8\\u4e2d',inactive:'\\ud83d\\udd34 \\u5df2\\u505c\\u6b62',"
-        "failed:'\\ud83d\\udd34 failed',unknown:'\\u26aa \\u672a\\u77e5'};"
-        "var d=G('astdot'),u=G('astup'),h=G('asthint');if(!d||!u)return;"
-        "d.textContent=map[j.a]||('\\ud83d\\udd34 '+j.a);"
-        "u.textContent=j.a==='active'?fmt(j.u):'\\u2014';"
-        "var t='';"
-        "if(j.r&&(j.s-j.r)<60){"
-        "if(j.a!=='active'&&j.s<j.r+25){t='\\ud83d\\udd04 \\u91cd\\u542f\\u8fdb\\u884c\\u4e2d\\u2026 \\u7ea6\\u5269 '"
-        "+Math.max(0,Math.ceil(j.r+25-j.s))+' \\u79d2';}"
-        "else if(j.a==='active'&&j.u!=null&&j.u<=45){t='\\u2705 \\u91cd\\u542f\\u5b8c\\u6210\\uff0c'"
-        "+'\\u65b0\\u8fdb\\u7a0b\\u5df2\\u8fd0\\u884c '+fmt(j.u);}}"
-        "if(h){h.style.display=t?'block':'none';h.textContent=t;}"
-        "setTimeout(tick,2000);}).catch(fail);}"
-        "tick();})();</script>"
+"<script>(function(){\nvar S='" + "/" + token + "/status" + "';\nvar A='" + "/" + token + "/act" + '\';\nvar lastAction=0;\nvar polling=false;\nfunction G(i){return document.getElementById(i);}\nfunction pad(n){return (n<10?\'0\':\'\')+n;}\nfunction fmt(s){if(s==null)return\'—\';var h=Math.floor(s/3600);return h+\':\'+pad(Math.floor(s%3600/60))+\':\'+pad(s%60);}\nfunction sendAction(name){\n  var body=new URLSearchParams();\n  body.set(\'act\',name);\n  fetch(A,{method:\'POST\',headers:{\'Content-Type\':\'application/x-www-form-urlencoded;charset=UTF-8\'},body:body.toString(),cache:\'no-store\',keepalive:true,credentials:\'same-origin\'}).catch(function(){});\n}\ndocument.addEventListener(\'click\',function(ev){\n  var b=ev.target.closest(\'button[name="act"][form="panel"]\');\n  if(!b||ev.defaultPrevented)return;\n  ev.preventDefault();\n  if(b.dataset.confirm&&!window.confirm(b.dataset.confirm))return;\n  var now=Date.now();\n  if(now-lastAction<1500)return;\n  lastAction=now;\n  sendAction(b.value);\n  var n=G(\'actionnote\');\n  if(n){n.style.display=\'block\';n.textContent=\'已尝试下发指令，实际状态以页面显示为准。\';}\n});\nvar panel=document.getElementById(\'panel\');\nif(panel){panel.addEventListener(\'submit\',function(ev){ev.preventDefault();});}\nfunction tick(){\n  if(polling)return;\n  polling=true;\n  var controller=new AbortController();\n  var timer=setTimeout(function(){controller.abort();},4000);\n  fetch(S,{cache:\'no-store\',signal:controller.signal,credentials:\'same-origin\'})\n  .then(function(r){return r.json();})\n  .then(function(j){\n    var map={active:\'🟢 运行中\',activating:\'🟡 启动中\',inactive:\'🔴 已停止\',failed:\'🔴 failed\',unknown:\'⚪ 未知\'};\n    var d=G(\'astdot\'),u=G(\'astup\'),h=G(\'asthint\');\n    if(d)d.textContent=map[j.a]||(\'🔴 \'+j.a);\n    if(u)u.textContent=j.a===\'active\'?fmt(j.u):\'—\';\n    var t=\'\';\n    if(j.r&&(j.s-j.r)<60){\n      if(j.a!==\'active\'&&j.s<j.r+25){t=\'🔄 重启进行中… 约剩 \'+Math.max(0,Math.ceil(j.r+25-j.s))+\' 秒\';}\n      else if(j.a===\'active\'&&j.u!=null&&j.u<=45){t=\'✅ 重启完成，新进程已运行 \'+fmt(j.u);}\n    }\n    if(h){h.style.display=t?\'block\':\'none\';h.textContent=t;}\n  })\n  .catch(function(){var d=G(\'astdot\');if(d)d.textContent=\'⚪ 连接失败\';})\n  .finally(function(){clearTimeout(timer);polling=false;setTimeout(tick,2000);});\n}\ntick();\n})();</script>'
     )
-
 
 def page(token, note):
     online, uid, nick = login_info()
@@ -321,13 +308,13 @@ def page(token, note):
         + '</span></div>'
         '<div id="asthint" style="display:none;color:#ffd479"></div>'
         '<div class="b"><button name="act" value="core_restart" form="panel"'
-        ' onclick="return confirm(\'确定重启 AstrBot？消息将中断约10~30秒\')">'
+        ' data-confirm="确定重启 AstrBot？消息将中断约10~30秒">'
         "🔁 重启 AstrBot</button></div></div>"
     )
     note_html = f'<div class="note">{note}</div>' if note else ""
     return (
         "<!doctype html><html><head><meta charset=utf-8>"
-        '<meta http-equiv="refresh" content="30">'
+        ''
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>肥鱼中控</title><style>"
         "body{font-family:sans-serif;background:#101820;color:#dfe8ef;margin:10px}"
@@ -347,6 +334,7 @@ def page(token, note):
         + core_card
         + drops_card()
         + tools_card(token)
+        + '<div id="actionnote" class="note" style="display:none"></div>'
         + note_html
         + "<input type=hidden name=act value=></form>"
         + live_js(token)
@@ -582,7 +570,9 @@ class Handler(BaseHTTPRequestHandler):
         name = form.get("act", "").strip()
         if name.endswith("_"):
             name = name.rstrip("_")
+        panel_log("action", action=name, client=self.client_address[0])
         note = run_action(name, form)
+        panel_log("action_result", action=name, note=note)
         _state["note"] = note
         self.send_response(303)
         self.send_header("Location", "/" + self.token)

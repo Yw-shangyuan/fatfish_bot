@@ -29,6 +29,8 @@ import os
 import subprocess
 import sys
 import time
+
+import recover_snowluma
 from urllib import parse as urlparse
 from urllib import request as urlreq
 
@@ -145,6 +147,16 @@ def main():
         time.sleep(RECHECK_WAIT)
         res = checks()  # 以复检为准
 
+    recovery_result = None
+    recovery_error = ""
+    try:
+        recovery_result = recover_snowluma.maybe_auto_recover()
+        if recovery_result and recovery_result.get("attempted"):
+            res = checks()
+    except Exception as exc:
+        recovery_error = f"{type(exc).__name__}: {exc}"
+        recover_snowluma.append_log("recovery_error", detail=recovery_error)
+
     now = time.time()
     msgs = []
     for item, (ok, det) in res.items():
@@ -163,6 +175,13 @@ def main():
             st["alert_n"] = st.get("alert_n", 1) + 1
             msgs.append("⏰ %s 仍异常（第 %d 次提醒）\n%s" % (item, st["alert_n"], det))
         state[item] = st
+    if recovery_error:
+        msgs.append("🔴 自动恢复检查失败\n%s" % recovery_error)
+    if recovery_result:
+        if recovery_result.get("success"):
+            msgs.append("✅ 自动恢复成功\n%s" % recovery_result.get("detail", ""))
+        else:
+            msgs.append("🔴 自动恢复失败\n%s" % recovery_result.get("detail", ""))
     json.dump(state, open(STATEF, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
     if msgs and not os.path.exists(MUTE):
