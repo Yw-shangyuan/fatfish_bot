@@ -13,7 +13,7 @@ rsync -a --delete --exclude .git --exclude __pycache__ --exclude '*.pyc' --exclu
 rsync -a --delete --exclude .git --exclude __pycache__ --exclude '*.pyc' --exclude '*.bak*' --exclude 'drop/' --exclude '*.log' --exclude '*.db' --exclude '*.pid' "$OPS/" "$DST/ops/"
 
 # 3. helper scripts living in home root
-for f in /home/ubuntu/deploy.sh /home/ubuntu/grab.py /home/ubuntu/backup-data.sh /home/ubuntu/backup-src.sh /home/ubuntu/notify.sh /home/ubuntu/set_mute.py /home/ubuntu/update_prefs.py /home/ubuntu/inspect_fu.py /home/ubuntu/patch_comment.py /home/ubuntu/patch_gate.py /home/ubuntu/patch_veto.py; do
+for f in /home/ubuntu/deploy.sh /home/ubuntu/grab.py /home/ubuntu/backup-data.sh /home/ubuntu/backup-memory.sh /home/ubuntu/backup-src.sh /home/ubuntu/notify.sh /home/ubuntu/set_mute.py /home/ubuntu/update_prefs.py /home/ubuntu/inspect_fu.py /home/ubuntu/patch_comment.py /home/ubuntu/patch_gate.py /home/ubuntu/patch_veto.py; do
   [ -f "$f" ] && cp -f "$f" "$DST/ops/" || true
 done
 cp -f /etc/systemd/system/fatfish-qr.service "$DST/ops/" 2>/dev/null || true

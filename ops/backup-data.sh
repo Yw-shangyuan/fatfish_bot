@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# FatFish data backup (channel B): cold copy -> age encrypt -> GitHub orphan branch -> WeChat notify (Server酱)
-# 范围=纯记忆与登录态（缓存垃圾已排除，见下方 tar --exclude）。
-# 计划任务: 每3天 04:20 一次 (crontab: 20 4 */3 * *)。
+# FatFish full cold backup: cold copy -> age encrypt -> GitHub orphan branch -> WeChat notify.
+# Includes SnowLuma QQ runtime/login state and temporarily stops services.
+# Manual only: /home/ubuntu/backup-data.sh --manual-cold
 set -euo pipefail
+
+if [[ "${1:-}" != "--manual-cold" ]]; then
+  echo "Refusing automatic cold backup. Run explicitly with --manual-cold."
+  exit 2
+fi
 
 DST=/home/ubuntu/backups/data
 PUB=$(cat /home/ubuntu/.ssh/fatfish_age_pub.txt)
@@ -53,17 +58,12 @@ sudo tar -I "gzip -1" -cf "$RAW" \
   --exclude="*__pycache__*" \
   --exclude="*.pyc" \
   --exclude="*.log" \
-  --exclude="srv/napcat/qqdata/global/nt_data/Log" \
-  --exclude="srv/napcat/qqdata/global/nt_data/Emoji" \
-  --exclude="srv/napcat/qqdata/NapCat/temp" \
-  --exclude="srv/napcat/qqdata/Crashpad" \
-  --exclude="srv/napcat/qqdata/crash_files" \
   --exclude="srv/snowluma/local/*/Log" \
   --exclude="srv/snowluma/local/*/log" \
   --exclude="srv/snowluma/local/*/*Log*" \
   --exclude="srv/snowluma/local/*/Crashpad" \
   --exclude="srv/snowluma/data/temp" \
-  -C / home/ubuntu/AstrBot/data srv/napcat srv/snowluma etc/systemd/system/astrbot.service
+  -C / home/ubuntu/AstrBot/data srv/snowluma etc/systemd/system/astrbot.service
 
 docker start snowluma >/dev/null
 sudo systemctl start astrbot
@@ -74,8 +74,8 @@ rm -f "$RAW"
 sha256sum "$RAW.age" > "$RAW.age.sha256"
 
 # local rolling: keep 7
-ls -t "$DST"/*.age 2>/dev/null | tail -n +8 | xargs -r rm -f || true
-ls -t "$DST"/*.sha256 2>/dev/null | tail -n +8 | xargs -r rm -f || true
+ls -t "$DST"/fatfish-data-*.age 2>/dev/null | tail -n +8 | xargs -r rm -f || true
+ls -t "$DST"/fatfish-data-*.age.sha256 2>/dev/null | tail -n +8 | xargs -r rm -f || true
 
 # ---- push to GitHub as orphan branch ----
 BR=backup-$STAMP
