@@ -7,16 +7,21 @@ A mute gate is a file holding an epoch deadline; absent/expired = open.
 To extend: add a row to GATES or OFF_SECONDS, or a name->callable entry to
 EXTRA_ACTIONS, and it shows up as a button automatically.
 """
+import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 PORT = 8765
 DROP_DIR = "/home/ubuntu/ops/drop"
@@ -41,6 +46,62 @@ ONEBOT_CFG = "/srv/snowluma/data/config/onebot.json"
 RESTART_COOLDOWN = 60.0
 _state = {"last_restart": 0.0, "note": ""}
 PANEL_LOG = "/home/ubuntu/ops/panel.log"
+MEMORY_DATA_DIR = "/home/ubuntu/AstrBot/data/fatfish_user_context"
+MEMORY_PLUGIN_DIR = "/home/ubuntu/AstrBot/data/plugins/astrbot_plugin_fatfish_user_context"
+if MEMORY_PLUGIN_DIR not in sys.path:
+    sys.path.insert(0, MEMORY_PLUGIN_DIR)
+
+from store import StoreError, UserContextStore, normalize_qq, qq_user_hash
+
+
+def memory_export_zip(qq):
+    target_qq = normalize_qq(qq)
+    user_hash = qq_user_hash(target_qq)
+    store = UserContextStore(MEMORY_DATA_DIR)
+    binding = store.get_binding_by_hash(user_hash)
+    if binding is None:
+        raise StoreError("该 QQ 尚未启用长期记忆")
+    documents = store.load_user_documents(target_qq)
+    files = {}
+    for kind in ("intro", "memory"):
+        path = store.document_path(target_qq, kind)
+        if path.exists():
+            files[f"{kind}.md"] = path.read_text(encoding="utf-8")
+    manifest = {
+        "schema_version": 1,
+        "user_hash": user_hash,
+        "enabled": binding["enabled"],
+        "kb_ids": binding["kb_ids"],
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "files": sorted(files),
+        "note": "The source QQ number is intentionally not included.",
+    }
+    files["manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, text in files.items():
+            archive.writestr(name, text.encode("utf-8"))
+    return output.getvalue(), f"fatfish-memory-{user_hash[:12]}.zip"
+
+
+def owner_guidance_export_zip():
+    store = UserContextStore(MEMORY_DATA_DIR)
+    guidance = store.read_owner_guidance()
+    if not guidance:
+        raise StoreError("主人长期指导当前为空")
+    manifest = {
+        "schema_version": 1,
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "files": ["owner_guidance.md", "manifest.json"],
+    }
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("owner_guidance.md", guidance.encode("utf-8") + b"\n")
+        archive.writestr(
+            "manifest.json",
+            (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+        )
+    return output.getvalue(), "fatfish-owner-guidance.zip"
 
 
 def panel_log(event, **fields):
@@ -276,6 +337,18 @@ def live_js(token):
 "<script>(function(){\nvar S='" + "/" + token + "/status" + "';\nvar A='" + "/" + token + "/act" + '\';\nvar lastAction=0;\nvar polling=false;\nfunction G(i){return document.getElementById(i);}\nfunction pad(n){return (n<10?\'0\':\'\')+n;}\nfunction fmt(s){if(s==null)return\'—\';var h=Math.floor(s/3600);return h+\':\'+pad(Math.floor(s%3600/60))+\':\'+pad(s%60);}\nfunction sendAction(name){\n  var body=new URLSearchParams();\n  body.set(\'act\',name);\n  fetch(A,{method:\'POST\',headers:{\'Content-Type\':\'application/x-www-form-urlencoded;charset=UTF-8\'},body:body.toString(),cache:\'no-store\',keepalive:true,credentials:\'same-origin\'}).catch(function(){});\n}\ndocument.addEventListener(\'click\',function(ev){\n  var b=ev.target.closest(\'button[name="act"][form="panel"]\');\n  if(!b||ev.defaultPrevented)return;\n  ev.preventDefault();\n  if(b.dataset.confirm&&!window.confirm(b.dataset.confirm))return;\n  var now=Date.now();\n  if(now-lastAction<1500)return;\n  lastAction=now;\n  sendAction(b.value);\n  var n=G(\'actionnote\');\n  if(n){n.style.display=\'block\';n.textContent=\'已尝试下发指令，实际状态以页面显示为准。\';}\n});\nvar panel=document.getElementById(\'panel\');\nif(panel){panel.addEventListener(\'submit\',function(ev){ev.preventDefault();});}\nfunction tick(){\n  if(polling)return;\n  polling=true;\n  var controller=new AbortController();\n  var timer=setTimeout(function(){controller.abort();},4000);\n  fetch(S,{cache:\'no-store\',signal:controller.signal,credentials:\'same-origin\'})\n  .then(function(r){return r.json();})\n  .then(function(j){\n    var map={active:\'🟢 运行中\',activating:\'🟡 启动中\',inactive:\'🔴 已停止\',failed:\'🔴 failed\',unknown:\'⚪ 未知\'};\n    var d=G(\'astdot\'),u=G(\'astup\'),h=G(\'asthint\');\n    if(d)d.textContent=map[j.a]||(\'🔴 \'+j.a);\n    if(u)u.textContent=j.a===\'active\'?fmt(j.u):\'—\';\n    var t=\'\';\n    if(j.r&&(j.s-j.r)<60){\n      if(j.a!==\'active\'&&j.s<j.r+25){t=\'🔄 重启进行中… 约剩 \'+Math.max(0,Math.ceil(j.r+25-j.s))+\' 秒\';}\n      else if(j.a===\'active\'&&j.u!=null&&j.u<=45){t=\'✅ 重启完成，新进程已运行 \'+fmt(j.u);}\n    }\n    if(h){h.style.display=t?\'block\':\'none\';h.textContent=t;}\n  })\n  .catch(function(){var d=G(\'astdot\');if(d)d.textContent=\'⚪ 连接失败\';})\n  .finally(function(){clearTimeout(timer);polling=false;setTimeout(tick,2000);});\n}\ntick();\n})();</script>'
     )
 
+def memory_card():
+    return (
+        '<div class="card"><div class="t">🧠 QQ 长期记忆</div>'
+        '<div>按 QQ 导出 intro.md、memory.md 和不含原始 QQ 的 manifest.json。文件含个人记忆，请勿转发。</div>'
+        '<div class="b"><input name="qq" form="memory-export" inputmode="numeric" '
+        'placeholder="QQ号" required>'
+        '<button name="act" value="memory_export" form="memory-export">📦 导出该用户记忆</button>'
+        '<button name="act" value="owner_guidance_export" form="memory-export">'
+        '📤 导出主人指导</button></div></div>'
+    )
+
+
 def page(token, note):
     online, uid, nick = login_info()
     dot = f"🟢 在线 · {nick}（{uid}）" if online else "⚪ 离线"
@@ -332,11 +405,13 @@ def page(token, note):
         + gate_card("bili")
         + login_card
         + core_card
+        + memory_card()
         + drops_card()
         + tools_card(token)
         + '<div id="actionnote" class="note" style="display:none"></div>'
         + note_html
         + "<input type=hidden name=act value=></form>"
+        + '<form id="memory-export" method="post" action="/' + token + '/act"></form>'
         + live_js(token)
         + "</body></html>"
     )
@@ -442,6 +517,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(raw)
+
+    def _send_download(self, body, filename):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(body)
 
     def _route(self):
         """Return the sub-path after the token, or None when token is wrong."""
@@ -570,6 +654,19 @@ class Handler(BaseHTTPRequestHandler):
         name = form.get("act", "").strip()
         if name.endswith("_"):
             name = name.rstrip("_")
+        if name in {"memory_export", "owner_guidance_export"}:
+            try:
+                if name == "memory_export":
+                    body, filename = memory_export_zip(form.get("qq", ""))
+                    user = qq_user_hash(form.get("qq", ""))[:12]
+                else:
+                    body, filename = owner_guidance_export_zip()
+                    user = "owner_guidance"
+                panel_log("memory_export", export_type=name, user=user)
+                self._send_download(body, filename)
+            except (StoreError, ValueError, OSError) as exc:
+                self._err(400, f"导出失败：{exc}")
+            return
         panel_log("action", action=name, client=self.client_address[0])
         note = run_action(name, form)
         panel_log("action_result", action=name, note=note)

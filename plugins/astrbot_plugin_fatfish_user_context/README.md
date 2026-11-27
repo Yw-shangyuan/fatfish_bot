@@ -1,6 +1,6 @@
 # FatFish User Context
 
-按 QQ 私聊用户加载独立的基本介绍、长期记忆和知识库引用。插件不修改 AstrBot 核心源码，不启用自动学习，也不执行 Git 提交或推送。
+按 QQ 私聊用户加载独立的基本介绍、长期记忆和知识库引用。插件提供分信任等级的长期记忆整理，不执行 Git 提交或推送。
 
 ## 数据目录
 
@@ -8,10 +8,15 @@
 
 ```text
 core.md
+owner_guidance.md
 bindings.json
 users/<user_hash>/intro.md
 users/<user_hash>/memory.md
+users/<user_hash>/pending.jsonl
+users/<user_hash>/memory_state.json
+users/<user_hash>/backups/
 backups/persona/
+backups/owner_guidance/
 ```
 
 `user_hash = SHA256("qq:" + QQ号)`。QQ 号只在计算和命令参数中使用，不写入用户文件或导出清单。
@@ -53,6 +58,35 @@ updated_at: <ISO 8601时间>
 
 手动编辑记忆时可保留文件头并修改正文。程序更新应调用 `UserContextStore.update_memory()`，该方法会原子替换文件并刷新时间。
 
+## 长期记忆
+
+仅 `owner_qq` 指定的主人可以管理记忆和写入 `owner_guidance.md`。其他用户的内容只形成该用户的事实、偏好和事件记录，不能修改主人格、主人指导或权限规则。
+
+短期对话在发送完成后写入 `pending.jsonl`，该文件不会注入提示词。每日 `daily_summary_time`（默认 03:30）按用户调用当前 LLM Provider 整理进 `memory.md`；主人的明确教导可整理进 `owner_guidance.md`。总结失败不会删除临时记录，也不会覆盖旧长期记忆。
+
+成功处理的短期记录默认保留 7 天，之后自动清理。未处理或处理失败的记录不会因到期而删除。每日任务与手动整理使用用户级异步锁，长期记忆覆盖前会保存历史版本。
+
+### 记忆管理命令
+
+以下命令仅主人在 QQ 私聊中可用：
+
+```text
+/qq记忆启用 <QQ号>
+/qq记忆整理 <QQ号>
+/qq记忆追加 <QQ号> <内容>
+/qq记忆教导 <内容>
+/qq记忆状态 <QQ号>
+/qq记忆导出 <QQ号>
+```
+
+- `记忆启用`：创建绑定、空长期记忆和短期队列，不配置知识库引用。
+- `记忆整理`：立即总结该用户的未处理短期记录。
+- `记忆追加`：直接向该用户长期记忆追加一条带时间的记录。
+- `记忆教导`：直接追加主人长期指导，所有 QQ 私聊共享。
+- `记忆状态`：查看待处理数量、长期记忆大小和最近清理结果。
+
+非流式发送完成后由 `after_message_sent` 记录真实回复。若平台使用流式发送且未触发该钩子，这部分回复不会进入短期队列，应以运行日志和实际消息验证。
+
 ## 导出
 
 管理员命令：
@@ -79,5 +113,7 @@ python3 /home/ubuntu/AstrBot/data/plugins/astrbot_plugin_fatfish_user_context/ex
 运行独立自测：
 
 ```bash
-python3 -B /home/ubuntu/AstrBot/data/plugins/astrbot_plugin_fatfish_user_context/selftest.py
+cd /home/ubuntu/AstrBot/data/plugins/astrbot_plugin_fatfish_user_context
+python3 -B selftest.py
+python3 -B -m unittest -v test_memory.py
 ```

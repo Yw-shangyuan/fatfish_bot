@@ -2,21 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from contextlib import suppress
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger, sp
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
+from astrbot.core.star.filter.command import GreedyStr
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 if str(PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR))
 
 from export import export_user  # noqa: E402
+from memory import MemoryConsolidator  # noqa: E402
 from store import (  # noqa: E402
     StoreError,
     UserContextStore,
+    build_owner_guidance_prompt,
     build_user_prompt,
     normalize_qq,
     qq_user_hash,
@@ -34,7 +39,7 @@ KB_STATE_KEY = "fatfish_user_context_kb_state"
     PLUGIN_NAME,
     "FatFish",
     "按 QQ 用户加载独立介绍、长期记忆和知识库配置",
-    "0.1.0",
+    "0.2.0",
 )
 class FatFishUserContext(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -45,6 +50,13 @@ class FatFishUserContext(Star):
         self.store = UserContextStore(data_dir)
         self._core_sync_lock = asyncio.Lock()
         self._kb_lock = asyncio.Lock()
+        self._memory_daily_task = None
+        self.memory_consolidator = MemoryConsolidator(
+            self.store,
+            context=self.context,
+            owner_qq=str(config.get("owner_qq") or "3406408181"),
+            retention_days=int(config.get("pending_retention_days", 7)),
+        )
 
     def _enabled(self) -> bool:
         return bool(self.config.get("enable", True))
@@ -72,6 +84,30 @@ class FatFishUserContext(Star):
 
     def _command_allowed(self, event: AstrMessageEvent) -> bool:
         return self._event_qq(event) is not None and event.is_admin()
+
+    def _memory_enabled(self) -> bool:
+        return self._enabled() and bool(self.config.get("memory_enable", True))
+
+    def _memory_command_allowed(self, event: AstrMessageEvent) -> bool:
+        qq = self._event_qq(event)
+        if qq is None or not self._memory_enabled():
+            return False
+        return qq == str(self.memory_consolidator.owner_qq)
+
+    def _seconds_until_summary(self) -> float:
+        raw = str(self.config.get("daily_summary_time", "03:30"))
+        try:
+            hour_text, minute_text = raw.split(":", 1)
+            hour, minute = int(hour_text), int(minute_text)
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError
+        except (TypeError, ValueError):
+            hour, minute = 3, 30
+        now = datetime.now().astimezone()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return max(1.0, (target - now).total_seconds())
 
     def _top_k(self) -> int:
         try:
@@ -176,6 +212,15 @@ class FatFishUserContext(Star):
             )
             return f"主人格已同步：{persona_id}\n旧版本备份：{backup}"
 
+    async def _memory_daily_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._seconds_until_summary())
+            try:
+                result = await self.memory_consolidator.consolidate_all()
+                logger.info("[user_context] 每日记忆整理完成：%s", result)
+            except Exception as exc:
+                logger.error(f"[user_context] 每日记忆整理失败：{exc}", exc_info=True)
+
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self) -> None:
         if not self._enabled():
@@ -185,6 +230,13 @@ class FatFishUserContext(Star):
             logger.info("[user_context] %s", result)
         except Exception as exc:
             logger.error(f"[user_context] 主人格同步失败，保留原人格：{exc}", exc_info=True)
+        if self._memory_enabled() and (
+            self._memory_daily_task is None or self._memory_daily_task.done()
+        ):
+            self._memory_daily_task = asyncio.create_task(
+                self._memory_daily_loop(),
+                name="fatfish-user-memory-daily",
+            )
 
     @filter.on_waiting_llm_request()
     async def prepare_llm_request(self, event: AstrMessageEvent) -> None:
@@ -219,6 +271,16 @@ class FatFishUserContext(Star):
         qq = self._event_qq(event)
         if qq is None:
             return
+        if self._memory_enabled():
+            try:
+                guidance_overlay = build_owner_guidance_prompt(
+                    self.store.read_owner_guidance(),
+                    max_chars=self._max_chars("max_guidance_chars", 6000),
+                )
+                if guidance_overlay:
+                    req.system_prompt = f"{req.system_prompt or ''}{guidance_overlay}"
+            except StoreError as exc:
+                logger.error(f"[user_context] 主人指导读取失败：{exc}")
         try:
             binding = self.store.get_binding(qq)
         except StoreError as exc:
@@ -239,6 +301,35 @@ class FatFishUserContext(Star):
         )
         if overlay:
             req.system_prompt = f"{req.system_prompt or ''}{overlay}"
+
+    @filter.after_message_sent()
+    async def capture_memory(self, event: AstrMessageEvent) -> None:
+        if not self._memory_enabled():
+            return
+        qq = self._event_qq(event)
+        if qq is None:
+            return
+        user_text = str(event.message_str or "").strip()
+        if not user_text or user_text.startswith("/"):
+            return
+        try:
+            binding = self.store.get_binding(qq)
+            if binding is None or not binding.get("enabled"):
+                return
+            result = event.get_result()
+            if result is None:
+                return
+            assistant_text = result.get_plain_text().strip()
+            if not assistant_text:
+                return
+            await asyncio.to_thread(
+                self.store.append_pending,
+                qq,
+                user_text,
+                assistant_text,
+            )
+        except Exception as exc:
+            logger.error(f"[user_context] 短期记忆写入失败：{exc}", exc_info=True)
 
     @filter.command("qq知识库列表")
     async def list_knowledge_bases(
@@ -365,6 +456,95 @@ class FatFishUserContext(Star):
             return
         yield event.plain_result(result)
 
+    @filter.command("qq记忆启用")
+    async def enable_memory(self, event: AstrMessageEvent, qq: str = ""):
+        if not self._memory_command_allowed(event):
+            return
+        try:
+            target_qq = normalize_qq(qq)
+            user_hash = self.store.enable_user(target_qq)
+        except (StoreError, ValueError, OSError) as exc:
+            yield event.plain_result(f"启用失败：{exc}")
+            return
+        yield event.plain_result(
+            f"已启用该 QQ 的长期记忆：{user_hash[:12]}…\n"
+            "未配置知识库引用，短期对话将在发送后进入待整理队列。"
+        )
+
+    @filter.command("qq记忆整理")
+    async def consolidate_memory(self, event: AstrMessageEvent, qq: str = ""):
+        if not self._memory_command_allowed(event):
+            return
+        try:
+            target_qq = normalize_qq(qq)
+            result = await self.memory_consolidator.summarize_qq(
+                target_qq,
+                umo=event.unified_msg_origin,
+            )
+        except Exception as exc:
+            yield event.plain_result(f"记忆整理失败：{type(exc).__name__}: {exc}")
+            return
+        if result["summarized"] == 0:
+            yield event.plain_result(
+                f"当前没有待整理记忆。本次清理已处理临时记录：{result['removed']} 条。"
+            )
+        else:
+            yield event.plain_result(
+                f"记忆整理完成：总结 {result['summarized']} 条，"
+                f"清理已处理临时记录 {result['removed']} 条。"
+            )
+
+    @filter.command("qq记忆追加")
+    async def append_memory(self, event: AstrMessageEvent, qq: str, content: GreedyStr):
+        if not self._memory_command_allowed(event):
+            return
+        try:
+            target_qq = normalize_qq(qq)
+            self.store.append_memory_note(target_qq, content)
+        except (StoreError, ValueError, OSError) as exc:
+            yield event.plain_result(f"追加失败：{exc}")
+            return
+        yield event.plain_result("已追加到该 QQ 的长期记忆，下一次私聊请求起生效。")
+
+    @filter.command("qq记忆教导")
+    async def append_owner_guidance(self, event: AstrMessageEvent, content: GreedyStr):
+        if not self._memory_command_allowed(event):
+            return
+        try:
+            self.store.append_owner_guidance(content)
+        except (StoreError, ValueError, OSError) as exc:
+            yield event.plain_result(f"教导写入失败：{exc}")
+            return
+        yield event.plain_result("已追加主人长期指导，下一次 QQ 私聊请求起生效。")
+
+    @filter.command("qq记忆状态")
+    async def memory_status(self, event: AstrMessageEvent, qq: str = ""):
+        if not self._memory_command_allowed(event):
+            return
+        try:
+            target_qq = normalize_qq(qq)
+            binding = self.store.get_binding(target_qq)
+            if binding is None:
+                yield event.plain_result("该 QQ 尚未启用长期记忆")
+                return
+            status = self.store.memory_status(target_qq)
+        except (StoreError, ValueError, OSError) as exc:
+            yield event.plain_result(f"状态读取失败：{exc}")
+            return
+        state = status["state"]
+        lines = [
+            f"启用状态：{'已启用' if binding['enabled'] else '已停用'}",
+            f"待整理：{status['pending_unprocessed']} 条",
+            f"短期记录总数：{status['pending_total']} 条",
+            f"长期记忆：{status['memory_chars']} 字符",
+            f"最近总结：{state.get('last_summary', '从未')}",
+            f"最近清理：{state.get('last_cleanup', '从未')}，"
+            f"删除 {state.get('last_cleanup_removed', 0)} 条",
+        ]
+        if state.get("last_error"):
+            lines.append(f"最近错误：{state['last_error']}")
+        yield event.plain_result("\n".join(lines))
+
     @filter.command("qq记忆导出")
     async def export_memory(self, event: AstrMessageEvent, qq: str = ""):
         if not self._command_allowed(event):
@@ -383,4 +563,8 @@ class FatFishUserContext(Star):
         yield event.plain_result(f"导出完成：{target}")
 
     async def terminate(self):
+        if self._memory_daily_task is not None:
+            self._memory_daily_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._memory_daily_task
         logger.info("[user_context] 插件已卸载")

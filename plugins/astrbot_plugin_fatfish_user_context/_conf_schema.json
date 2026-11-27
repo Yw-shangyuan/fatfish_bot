@@ -14,6 +14,31 @@
     "description": "用户介绍与记忆的导出根目录",
     "default": "/home/ubuntu/exports/fatfish_user_context"
   },
+  "owner_qq": {
+    "type": "string",
+    "description": "唯一可写入主人长期指导和管理用户记忆的 QQ 号",
+    "default": "3406408181"
+  },
+  "memory_enable": {
+    "type": "bool",
+    "description": "是否记录短期对话、注入主人指导并执行每日记忆整理",
+    "default": true
+  },
+  "daily_summary_time": {
+    "type": "string",
+    "description": "每日记忆整理时间，24 小时制 HH:MM，按服务器本地时区",
+    "default": "03:30"
+  },
+  "pending_retention_days": {
+    "type": "int",
+    "description": "成功总结后的短期记录保留天数；未处理记录不会自动删除",
+    "default": 7
+  },
+  "max_guidance_chars": {
+    "type": "int",
+    "description": "单次请求最多注入的主人长期指导字符数，0 表示不截断",
+    "default": 6000
+  },
   "persona_id": {
     "type": "string",
     "description": "由 core.md 管理的 AstrBot 主人格 ID；留空则不同步主人格",

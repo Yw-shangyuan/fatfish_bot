@@ -88,6 +88,14 @@ def check_main_kb_lifecycle(store: UserContextStore, qq: str) -> None:
     star_module.Context = type("Context", (), {})
     star_module.Star = Star
     star_module.register = lambda *args, **kwargs: lambda cls: cls
+    core_module = types.ModuleType("astrbot.core")
+    core_module.__path__ = []
+    core_star_module = types.ModuleType("astrbot.core.star")
+    core_star_module.__path__ = []
+    core_filter_module = types.ModuleType("astrbot.core.star.filter")
+    core_filter_module.__path__ = []
+    command_module = types.ModuleType("astrbot.core.star.filter.command")
+    command_module.GreedyStr = type("GreedyStr", (str,), {})
     sys.modules.update(
         {
             "astrbot": astrbot,
@@ -95,6 +103,10 @@ def check_main_kb_lifecycle(store: UserContextStore, qq: str) -> None:
             "astrbot.api.event": event_module,
             "astrbot.api.provider": provider_module,
             "astrbot.api.star": star_module,
+            "astrbot.core": core_module,
+            "astrbot.core.star": core_star_module,
+            "astrbot.core.star.filter": core_filter_module,
+            "astrbot.core.star.filter.command": command_module,
         }
     )
 
